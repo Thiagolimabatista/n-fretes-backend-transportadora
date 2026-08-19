@@ -12,7 +12,6 @@ import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/Login.dto';
 import { AuthResponseDto, AuthResponseRegisterDto } from './dto/Auth.dto';
-import { PhoneJson } from './interfaces/IAuth';
 import {
   AuthcodeEmail,
   NotFoundUser,
@@ -20,7 +19,13 @@ import {
   ResponseAuthMe,
   ResponseAuthMeTokenInvalid,
 } from 'src/common/auth-swagger/auth-swagger';
-import { ChangePasswordDto, ResetPasswordDto } from './dto/Password.dto';
+import {
+  ChangePasswordDto,
+  PhoneNumberDto,
+  RecoveryCodeDto,
+  ResetPasswordByRecoveryCodeDto,
+} from './dto/Password.dto';
+import { RegisterDto } from './dto/Register.dto';
 import { Param } from '@nestjs/common';
 import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
 import { Company } from '@entities/company.entity';
@@ -31,7 +36,7 @@ import {
 } from './dto/ContactCompanyAuth.dto';
 import { UpdateCompanyLoginDto } from './dto/UpdateCompanyLogin.dto';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { ILike, Repository } from 'typeorm';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -53,16 +58,40 @@ export class AuthController {
     status: 400,
     description: 'Erro ao registrar o usuário, como CPF já registrado',
   })
-  async register(@Body() registerDto: any): Promise<AuthResponseRegisterDto> {
+  async register(
+    @Body() registerDto: RegisterDto,
+  ): Promise<AuthResponseRegisterDto> {
     return this.authService.register(registerDto);
   }
 
   /********************************************************************************** */
 
   @Get('check-cnpj/:cnpj')
+  @ApiOperation({ summary: 'Verificar se já existe cadastro para o CNPJ' })
   async checkCnpj(@Param('cnpj') cnpj: string) {
+    const digits = (cnpj ?? '').replace(/\D/g, '');
+    const formatted =
+      digits.length === 14
+        ? digits.replace(
+            /^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/,
+            '$1.$2.$3/$4-$5',
+          )
+        : cnpj;
     const exists = !!(await this.companyRepository.findOne({
-      where: { cnpj },
+      where: [{ cnpj: formatted }, { cnpj: digits }],
+    }));
+    return { exists };
+  }
+
+  @Get('check-email/:email')
+  @ApiOperation({ summary: 'Verificar se já existe cadastro para o e-mail' })
+  async checkEmail(@Param('email') email: string) {
+    const normalized = (email ?? '').trim();
+    if (!normalized) {
+      return { exists: false };
+    }
+    const exists = !!(await this.companyRepository.findOne({
+      where: { email: ILike(normalized) },
     }));
     return { exists };
   }
@@ -108,12 +137,12 @@ export class AuthController {
     description: 'Não encontramos usuário em nossa base de dados',
   })
   @Post('password/forgot')
-  async sendRecoveryCode(@Body() phoneNumber: PhoneJson) {
+  async sendRecoveryCode(@Body() phoneNumber: PhoneNumberDto) {
     return this.authService.generateRecoveryCodeAndSendNumber(phoneNumber);
   }
 
   @Post('verify-phone')
-  async sendCodeVerify(@Body() phoneNumber: PhoneJson) {
+  async sendCodeVerify(@Body() phoneNumber: PhoneNumberDto) {
     return this.authService.sendCodeVerify(phoneNumber);
   }
 
@@ -135,7 +164,7 @@ export class AuthController {
     description: 'Não encontramos usuário em nossa base de dados',
   })
   @Post('password/code')
-  async validateRecoveryCode(@Body() recoveryDto: any) {
+  async validateRecoveryCode(@Body() recoveryDto: RecoveryCodeDto) {
     return this.authService.validateRecoveryCode(recoveryDto);
   }
 
@@ -188,7 +217,9 @@ export class AuthController {
   })
   @ApiBody(recoveryPasswordAndCode)
   @Post('password/reset-password')
-  async resetPassword(@Body() resetPasswordDto: any) {
+  async resetPassword(
+    @Body() resetPasswordDto: ResetPasswordByRecoveryCodeDto,
+  ) {
     return this.authService.changePasswordByRecoveryCode(resetPasswordDto);
   }
 

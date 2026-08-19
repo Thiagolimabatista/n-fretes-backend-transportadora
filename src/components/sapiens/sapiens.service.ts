@@ -13,9 +13,10 @@ import axios from 'axios';
 @Injectable()
 export class SapiensService {
   private readonly SAPIENS_BASE_URL =
+    process.env.SAPIENS_BASE_URL ??
     'https://integration-9a3k2z.fretes.sapiensagro.com';
-  private readonly USERNAME = 'carlos@ezsoft.com.br';
-  private readonly PASSWORD = 'TwrDagetn';
+  private readonly USERNAME = process.env.SAPIENS_USERNAME ?? '';
+  private readonly PASSWORD = process.env.SAPIENS_PASSWORD ?? '';
 
   private accessToken: string | null = null;
   private tokenExpiry: Date | null = null;
@@ -26,6 +27,13 @@ export class SapiensService {
   ) {}
 
   private async getAccessToken(): Promise<string> {
+    if (!this.USERNAME || !this.PASSWORD) {
+      throw new HttpException(
+        'Serviço de cotação temporariamente indisponível',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+
     if (this.accessToken && this.tokenExpiry && new Date() < this.tokenExpiry) {
       return this.accessToken;
     }
@@ -49,7 +57,7 @@ export class SapiensService {
       this.tokenExpiry = new Date(Date.now() + 3600 * 1000);
 
       return this.accessToken;
-    } catch (error) {
+    } catch {
       throw new HttpException(
         'Erro ao autenticar com Sapiens API',
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -75,7 +83,7 @@ export class SapiensService {
       );
 
       return response.data;
-    } catch (error) {
+    } catch {
       throw new HttpException(
         'Erro ao buscar cotação da Sapiens API',
         HttpStatus.INTERNAL_SERVER_ERROR,

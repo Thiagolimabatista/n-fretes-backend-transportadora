@@ -59,10 +59,17 @@ export interface ZApiSendTextResponse {
 @Injectable()
 export class FretebrasService {
   private readonly logger = new Logger(FretebrasService.name);
-  private readonly baseUrl = 'https://api.z-api.io';
-  private readonly instanceId = '3EBD760D4EA87252D76786079C760A11';
-  private readonly instanceToken = '8E7A649870C37DAEFC3E5232';
-  private readonly clientToken = 'Ff37625a772494b7185bc047d567b3762S';
+  private readonly baseUrl =
+    process.env.Z_API_BASE_URL ?? 'https://api.z-api.io';
+  private readonly instanceId = process.env.Z_API_INSTANCE_ID ?? '';
+  private readonly instanceToken = process.env.Z_API_INSTANCE_TOKEN ?? '';
+  private readonly clientToken = process.env.Z_API_CLIENT_TOKEN ?? '';
+
+  private ensureZApiConfigured(): void {
+    if (!this.instanceId || !this.instanceToken || !this.clientToken) {
+      throw new Error('Integração de mensagens temporariamente indisponível');
+    }
+  }
 
   private readonly BATCH_SIZE = 50;
   private readonly DELAY_BETWEEN_BATCHES = 2000;
@@ -144,6 +151,7 @@ export class FretebrasService {
 
   async getGroups(): Promise<ZApiGroupsResponse> {
     try {
+      this.ensureZApiConfigured();
       const url = `${this.baseUrl}/instances/${this.instanceId}/token/${this.instanceToken}/groups?page=1&pageSize=10`;
 
       this.logger.log(`Buscando grupos do WhatsApp`);
@@ -176,6 +184,7 @@ export class FretebrasService {
     phones: string[],
   ): Promise<ZApiAddParticipantResponse> {
     try {
+      this.ensureZApiConfigured();
       const url = `${this.baseUrl}/instances/${this.instanceId}/token/${this.instanceToken}/add-participant`;
 
       this.logger.log(
@@ -233,6 +242,7 @@ export class FretebrasService {
     message: string,
   ): Promise<ZApiSendTextResponse> {
     try {
+      this.ensureZApiConfigured();
       const url = `${this.baseUrl}/instances/${this.instanceId}/token/${this.instanceToken}/send-text`;
 
       this.logger.log(`Enviando mensagem para ${phone}`);

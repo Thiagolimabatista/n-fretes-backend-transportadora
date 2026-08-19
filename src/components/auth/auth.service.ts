@@ -1,13 +1,13 @@
 import * as bcrypt from 'bcrypt';
-import { Like, MoreThan, Not, Repository } from 'typeorm';
+import { randomInt } from 'crypto';
+import { DeepPartial, Like, MoreThan, Not, Repository } from 'typeorm';
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { AuthResponseDto, AuthResponseRegisterDto } from './dto/Auth.dto';
 import { LoginDto } from './dto/Login.dto';
-import { ChangePasswordDto, ResetPasswordDto } from './dto/Password.dto';
+import { ChangePasswordDto } from './dto/Password.dto';
 import * as jwt from 'jsonwebtoken';
-import sgMail from '@sendgrid/mail';
 import { PhoneJson } from './interfaces/IAuth';
 import { Company } from '@entities/company.entity';
 import { RecoveryCode } from '@entities/recovery-codes.entity';
@@ -22,6 +22,11 @@ import {
 } from './dto/ContactCompanyAuth.dto';
 import { CompanySearchService } from '@components/company-search/company-search.service';
 import { PlansCompany } from '@entities/plans-company.entity';
+import { RegisterDto } from './dto/Register.dto';
+import {
+  RecoveryCodeDto,
+  ResetPasswordByRecoveryCodeDto,
+} from './dto/Password.dto';
 
 @Injectable()
 export class AuthService {
@@ -40,19 +45,15 @@ export class AuthService {
     private featureLogsRepository: Repository<FeatureLog>,
     @InjectRepository(ContactCompany)
     private contactCompanyRepository: Repository<ContactCompany>,
-    @InjectRepository(PlansCompany)
-    private planCompanyRepository: Repository<PlansCompany>,
     private companySearchService: CompanySearchService,
   ) {}
 
   async generateJwt(payload: any) {
     const secret = this.configService.get<string>('JWT_SECRET');
-    const expiration =
-      this.configService.get<string>('JWT_EXPIRATION') || '30d';
     return jwt.sign(payload, secret, { expiresIn: '30d' });
   }
 
-  async register(registerDto: any): Promise<AuthResponseRegisterDto> {
+  async register(registerDto: RegisterDto): Promise<AuthResponseRegisterDto> {
     const queryRunner =
       this.companyRepository.manager.connection.createQueryRunner();
 
@@ -60,7 +61,8 @@ export class AuthService {
     await queryRunner.startTransaction();
 
     try {
-      const { cnpj, password, name, nameFantasy,email, cpf, ...userData } = registerDto;
+      const { cnpj, password, name, nameFantasy, email, cpf, ...userData } =
+        registerDto;
 
       const existingUser = await this.companyRepository.findOne({
         where: { cnpj },
@@ -115,7 +117,7 @@ export class AuthService {
         isOn: true,
         cnpj: this.formatCNPJ(cnpj),
         name: this.formatName(name),
-            email,
+        email,
         cpf: cpf || null,
         nameFantasy: this.formatName(nameFantasy),
         zipcode: findByCnpj.endereco.cep,
@@ -124,21 +126,37 @@ export class AuthService {
         street: findByCnpj.endereco.logradouro,
         district: findByCnpj.endereco.bairro,
         password: hashedPassword,
-      });
+      } as DeepPartial<Company>);
 
       const savedUser = await queryRunner.manager.save(newUser);
 
-      const plan = await this.planCompanyRepository.findOne({
-        where: {
-          isTrial: false,
-        },
+      const defaultPlanId = this.configService
+        .get<string>('DEFAULT_COMPANY_PLAN_ID')
+        ?.trim();
+      const planRepository = queryRunner.manager.getRepository(PlansCompany);
+      const plan = await planRepository.findOne({
+        where: defaultPlanId
+          ? { id: defaultPlanId, isTrial: false, status: true }
+          : { isTrial: false, status: true },
+        order: defaultPlanId
+          ? undefined
+          : {
+              value: 'ASC',
+              createdAt: 'ASC',
+            },
       });
+
+      if (!plan) {
+        throw new HttpException(
+          'Nenhum plano padrão ativo foi configurado',
+          HttpStatus.SERVICE_UNAVAILABLE,
+        );
+      }
 
       const trialEndDate = new Date();
       trialEndDate.setMonth(trialEndDate.getMonth() + 1);
 
       const subscriptionCompany = this.subscriptionCompanyRepository.create({
-        //@ts-ignore
         companyId: savedUser.id,
         status: 1,
         planId: plan.id,
@@ -159,9 +177,12 @@ export class AuthService {
     } catch (error) {
       await queryRunner.rollbackTransaction();
 
-      console.log(error, 'Resposta');
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
       throw new HttpException(
-        error?.message || 'Erro interno no servidor',
+        'Não foi possível concluir o cadastro',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     } finally {
@@ -173,13 +194,12 @@ export class AuthService {
     loginDto: LoginDto,
     ip: string,
   ): Promise<AuthResponseDto & { company: boolean }> {
+    void ip;
     const { cnpj, password } = loginDto;
     const user = await this.companyRepository.findOne({ where: { cnpj } });
 
-    console.log(user, 'USER LOGIN');
-
     if (!user) {
-      throw new HttpException('Usuário não encontrado', HttpStatus.BAD_REQUEST);
+      throw new HttpException('Credenciais inválidas', HttpStatus.UNAUTHORIZED);
     }
 
     if (!user.isActive) {
@@ -192,7 +212,7 @@ export class AuthService {
     const isPasswordValid = await bcrypt.compare(password, user.password);
 
     if (!isPasswordValid) {
-      throw new HttpException('Dados inválidos', HttpStatus.BAD_REQUEST);
+      throw new HttpException('Credenciais inválidas', HttpStatus.UNAUTHORIZED);
     }
 
     await this.companyRepository.save(user);
@@ -308,17 +328,18 @@ export class AuthService {
       });
 
       if (!user) {
-        throw new HttpException(
-          'Não localizamos esse número em nossa base de dados',
-          HttpStatus.NOT_FOUND,
-        );
+        return {
+          status: true,
+          message:
+            'Se o telefone estiver cadastrado, enviaremos um código de redefinição.',
+        };
       }
 
       await this.recoverCodeRepository.delete({
         phoneNumber: formattedPhone,
       });
 
-      const code = Math.floor(100000 + Math.random() * 900000);
+      const code = randomInt(100000, 1000000);
       const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
       const response = await this.whatsappService.whatsAppCode(
@@ -342,7 +363,8 @@ export class AuthService {
 
       return {
         status: true,
-        message: 'Código enviado com sucesso',
+        message:
+          'Se o telefone estiver cadastrado, enviaremos um código de redefinição.',
       };
     } catch (error) {
       if (error instanceof HttpException) {
@@ -363,12 +385,9 @@ export class AuthService {
       const { phoneNumber } = phone;
       const formattedPhone = this.formatPhoneNumber(phoneNumber);
 
-      const code = Math.floor(100000 + Math.random() * 900000);
+      const code = randomInt(100000, 1000000);
 
-      const response = await this.whatsappService.whatsAppCode(
-        formattedPhone,
-        code,
-      );
+      await this.whatsappService.whatsAppCode(formattedPhone, code);
 
       return {
         status: true,
@@ -385,7 +404,9 @@ export class AuthService {
       );
     }
   }
-  async validateRecoveryCode(recoveryDto: any): Promise<any> {
+  async validateRecoveryCode(
+    recoveryDto: RecoveryCodeDto,
+  ): Promise<{ success: boolean; message: string }> {
     try {
       const { phoneNumber, code } = recoveryDto;
 
@@ -402,8 +423,8 @@ export class AuthService {
 
       if (!user) {
         throw new HttpException(
-          'Não conseguimos localizar nenhum usuário com esse número',
-          HttpStatus.NOT_FOUND,
+          'Código expirado ou inválido',
+          HttpStatus.BAD_REQUEST,
         );
       }
 
@@ -462,36 +483,58 @@ export class AuthService {
   }
 
   async changePasswordByRecoveryCode(
-    resetPasswordDto: any,
+    resetPasswordDto: ResetPasswordByRecoveryCodeDto,
   ): Promise<{ message: string }> {
     const { phoneNumber, newPassword, code } = resetPasswordDto;
-    const phoneNumberVariations = [phoneNumber, phoneNumber.replace(')', ') ')];
+    const formattedPhone = this.formatPhoneNumber(phoneNumber);
+    const phoneNumberVariations = [
+      phoneNumber,
+      phoneNumber.replace(')', ') '),
+      formattedPhone,
+      `+${formattedPhone}`,
+    ];
 
-    const user = await this.companyRepository.findOne({
-      where: phoneNumberVariations.map((variation) => ({
-        phoneNumber: Like(`%${variation}%`),
-      })),
-    });
+    await this.companyRepository.manager.transaction(async (manager) => {
+      const recoveryCodeRepository = manager.getRepository(RecoveryCode);
+      const companyRepository = manager.getRepository(Company);
+      const recoveryCode = await recoveryCodeRepository.findOne({
+        where: {
+          code,
+          used: false,
+          phoneNumber: formattedPhone,
+          expiresAt: MoreThan(new Date()),
+        },
+        lock: { mode: 'pessimistic_write' },
+      });
 
-    const recoveryCode = await this.recoverCodeRepository.findOne({
-      where: {
-        code,
-        used: false,
-        phoneNumber: this.formatPhoneNumber(phoneNumber),
-        expiresAt: MoreThan(new Date()),
-      },
-    });
+      if (!recoveryCode) {
+        throw new HttpException(
+          'Código expirado ou inválido',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
 
-    if (!user) {
-      throw new HttpException('Usuário não encontrado', HttpStatus.NOT_FOUND);
-    }
+      const candidates = await companyRepository.find({
+        where: phoneNumberVariations.map((variation) => ({
+          phoneNumber: Like(`%${variation}%`),
+        })),
+      });
+      const user = candidates.find(
+        (candidate) =>
+          this.formatPhoneNumber(candidate.phoneNumber) === formattedPhone,
+      );
 
-    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-    user.password = hashedNewPassword;
-    await this.companyRepository.save(user);
+      if (!user) {
+        throw new HttpException(
+          'Código expirado ou inválido',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
 
-    await this.recoverCodeRepository.update(recoveryCode.id, {
-      used: true,
+      user.password = await bcrypt.hash(newPassword, 10);
+      recoveryCode.used = true;
+      await companyRepository.save(user);
+      await recoveryCodeRepository.save(recoveryCode);
     });
 
     return { message: 'Senha alterada com sucesso' };
@@ -505,7 +548,7 @@ export class AuthService {
       const user = await this.companyRepository.findOne({
         where: { id: decoded.sub },
         select: [
-           'id',
+          'id',
           'name',
           'email',
           'isActive',
@@ -608,7 +651,6 @@ export class AuthService {
   ): Promise<AuthResponseRegisterDto> {
     const { email, cpf, password, ...rest } = dto;
 
-
     const exists = await this.contactCompanyRepository.findOne({
       where: [
         { email, companyId: userId },
@@ -617,7 +659,10 @@ export class AuthService {
     });
 
     if (exists) {
-      throw new HttpException('Contato já cadastrado nesta empresa', HttpStatus.BAD_REQUEST);
+      throw new HttpException(
+        'Contato já cadastrado nesta empresa',
+        HttpStatus.BAD_REQUEST,
+      );
     }
     const hashedPassword = await bcrypt.hash(password, 10);
     const contact = this.contactCompanyRepository.create({
@@ -629,8 +674,7 @@ export class AuthService {
       isActive: true,
     });
     await this.contactCompanyRepository.save(contact);
-  
-  
+
     return { message: 'Contato cadastrado com sucesso' };
   }
 

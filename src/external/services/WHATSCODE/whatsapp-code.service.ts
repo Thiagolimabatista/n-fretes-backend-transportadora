@@ -7,12 +7,18 @@ export class WhatsappService {
   private readonly baseURL: string;
 
   constructor(private readonly httpService: HttpService) {
-    this.baseURL =
-      'https://api.ezchatbot.ai/run/9edd494d-d954-49c5-9e74-2d859da633ee?sender=2FA&token=ec348b13-4b5c-4e37-a557-77c44cb04b22';
+    this.baseURL = process.env.WHATSAPP_2FA_WEBHOOK_URL ?? '';
   }
 
   async whatsAppCode(phone: string, code: number) {
     try {
+      if (!this.baseURL) {
+        throw new HttpException(
+          'Serviço de envio de código temporariamente indisponível',
+          HttpStatus.SERVICE_UNAVAILABLE,
+        );
+      }
+
       const url = `${this.baseURL}`;
       const data = {
         phone,

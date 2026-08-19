@@ -16,6 +16,8 @@ import { ConfigService } from '@nestjs/config';
 export class SQSConsumerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SQSConsumerService.name);
   private sqsClient: SQSClient;
+  private readonly backgroundJobsEnabled =
+    (process.env.BACKGROUND_JOBS_ENABLED ?? 'false').toLowerCase() === 'true';
   private isPolling = true;
   private pollingPromises: Promise<void>[] = [];
   private reconnectAttempts = 0;
@@ -27,7 +29,9 @@ export class SQSConsumerService implements OnModuleInit, OnModuleDestroy {
     process.env.QUEUE_SHARING_NOTIFICATION_FREIGHT;
 
   constructor(private configService: ConfigService) {
-    this.initializeSQSClient();
+    if (this.backgroundJobsEnabled) {
+      this.initializeSQSClient();
+    }
   }
 
   private initializeSQSClient() {
@@ -47,6 +51,14 @@ export class SQSConsumerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
+    if (!this.backgroundJobsEnabled) {
+      this.isPolling = false;
+      this.logger.warn(
+        'SQS Consumer desabilitado por BACKGROUND_JOBS_ENABLED=false',
+      );
+      return;
+    }
+
     this.logger.log('🚀 Iniciando SQS Consumer (Worker Mode)...');
     this.logger.log('📡 Consumer ficará SEMPRE ativo escutando as filas');
 
@@ -57,8 +69,6 @@ export class SQSConsumerService implements OnModuleInit, OnModuleDestroy {
       );
       this.pollingPromises.push(promise);
     }
-
- 
 
     this.startHeartbeat();
   }
@@ -266,8 +276,7 @@ export class SQSConsumerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log('🚚 Processando notificação de frete:', messageBody);
 
       if (messageBody.type === 'FREIGHT_RESPONSE') {
-        const { freightRequestId, driverId, freightId, status, expiresAt } =
-          messageBody.data || {};
+        const { driverId, freightId } = messageBody.data || {};
 
         this.logger.log(
           `Driver ${driverId} recebeu resposta do frete ${freightId}`,
@@ -286,7 +295,7 @@ export class SQSConsumerService implements OnModuleInit, OnModuleDestroy {
     try {
       this.logger.log('👥 Processando compartilhamento de frete:', messageBody);
 
-      const { freightId, tokens, timestamp } = messageBody;
+      const { freightId, tokens } = messageBody;
 
       this.logger.log(
         `Notificando ${tokens?.length || 0} usuários sobre frete ${freightId}`,
