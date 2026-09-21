@@ -4,7 +4,6 @@ import { SdrController } from './sdr.controller';
 import { SdrService } from './srd.service';
 import { Company } from '@entities/company.entity';
 import { ContactCompany } from '@entities/contact-company.entity';
-import { SubscriptionCompany } from '@entities/subscription-company.entity';
 import { Freight } from '@entities/freight.entity';
 import { FreightRequest } from '@entities/freight-requests.entity';
 import { UsersDrive } from '@entities/users-drive.entity';
@@ -16,7 +15,6 @@ import { UsersLocation } from '@entities/users-location.entity';
     TypeOrmModule.forFeature([
       Company,
       ContactCompany,
-      SubscriptionCompany,
       Freight,
       FreightRequest,
       UsersDrive,

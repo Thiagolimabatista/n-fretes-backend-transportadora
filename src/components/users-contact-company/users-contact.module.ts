@@ -15,7 +15,6 @@ import { DriverDocument } from '@entities/driver-documents.entity';
 import { UsersContactCompanyService } from './users-contact.service';
 import { UsersContactCompanyController } from './users-contact.controller';
 import { UsersDrive } from '@entities/users-drive.entity';
-import { FeatureLog } from '@entities/feature-logs.entity';
 
 @Module({
   imports: [
@@ -23,7 +22,6 @@ import { FeatureLog } from '@entities/feature-logs.entity';
     TypeOrmModule.forFeature([
       CompanyUsersContacts,
       UsersDrive,
-      FeatureLog,
       ContactCompany,
       Freight,
       ContactGroup,

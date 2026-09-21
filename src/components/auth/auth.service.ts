@@ -1,10 +1,26 @@
 import * as bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
-import { DeepPartial, Like, MoreThan, Not, Repository } from 'typeorm';
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import {
+  DeepPartial,
+  Like,
+  MoreThan,
+  Not,
+  QueryFailedError,
+  Repository,
+} from 'typeorm';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { AuthResponseDto, AuthResponseRegisterDto } from './dto/Auth.dto';
+import {
+  AuthResponseDto,
+  AuthResponseRegisterDto,
+  CheckCnpjResponseDto,
+} from './dto/Auth.dto';
 import { LoginDto } from './dto/Login.dto';
 import { ChangePasswordDto } from './dto/Password.dto';
 import * as jwt from 'jsonwebtoken';
@@ -12,17 +28,21 @@ import { PhoneJson } from './interfaces/IAuth';
 import { Company } from '@entities/company.entity';
 import { RecoveryCode } from '@entities/recovery-codes.entity';
 import { WhatsappService } from 'src/external/services/WHATSCODE/whatsapp-code.service';
-import { SubscriptionCompany } from '@entities/subscription-company.entity';
-import { FeatureUsage } from '@entities/feature-usage.entity';
-import { FeatureLog } from '@entities/feature-logs.entity';
 import { ContactCompany } from '@entities/contact-company.entity';
 import {
   ContactCompanyRegisterDto,
   ContactCompanyLoginDto,
 } from './dto/ContactCompanyAuth.dto';
-import { CompanySearchService } from '@components/company-search/company-search.service';
-import { PlansCompany } from '@entities/plans-company.entity';
+import {
+  CompanySearchService,
+  ReceitaCnpjData,
+} from '@components/company-search/company-search.service';
 import { RegisterDto } from './dto/Register.dto';
+import {
+  cnpjLookupVariants,
+  formatCnpj,
+  isValidCnpj,
+} from 'src/utils/cnpj.util';
 import {
   RecoveryCodeDto,
   ResetPasswordByRecoveryCodeDto,
@@ -37,12 +57,6 @@ export class AuthService {
     private recoverCodeRepository: Repository<RecoveryCode>,
     private configService: ConfigService,
     private whatsappService: WhatsappService,
-    @InjectRepository(SubscriptionCompany)
-    private subscriptionCompanyRepository: Repository<SubscriptionCompany>,
-    @InjectRepository(FeatureUsage)
-    private featureUsageRepository: Repository<FeatureUsage>,
-    @InjectRepository(FeatureLog)
-    private featureLogsRepository: Repository<FeatureLog>,
     @InjectRepository(ContactCompany)
     private contactCompanyRepository: Repository<ContactCompany>,
     private companySearchService: CompanySearchService,
@@ -53,141 +67,166 @@ export class AuthService {
     return jwt.sign(payload, secret, { expiresIn: '30d' });
   }
 
-  async register(registerDto: RegisterDto): Promise<AuthResponseRegisterDto> {
-    const queryRunner =
-      this.companyRepository.manager.connection.createQueryRunner();
+  /**
+   * Validação do CNPJ para o formulário de cadastro (antes de enviar):
+   * dígitos, cadastro existente e situação na Receita Federal.
+   */
+  async checkCnpj(cnpj: string): Promise<CheckCnpjResponseDto> {
+    if (!isValidCnpj(cnpj ?? '')) {
+      return { exists: false, status: 'invalid', message: 'CNPJ inválido.' };
+    }
 
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
+    const existing = await this.companyRepository.findOne({
+      where: cnpjLookupVariants(cnpj).map((variant) => ({ cnpj: variant })),
+    });
+    if (existing) {
+      return {
+        exists: true,
+        status: 'registered',
+        message: 'Já existe um cadastro com este CNPJ.',
+      };
+    }
 
+    let receita: ReceitaCnpjData;
     try {
-      const { cnpj, password, name, nameFantasy, email, cpf, ...userData } =
-        registerDto;
-
-      const existingUser = await this.companyRepository.findOne({
-        where: { cnpj },
-      });
-      if (existingUser) {
-        throw new HttpException('CNPJ já cadastrado', HttpStatus.BAD_REQUEST);
-      }
-
-      const existingEmail = await this.companyRepository.findOne({
-        where: { email: registerDto.email },
-      });
-      if (existingEmail) {
-        throw new HttpException('E-mail já cadastrado', HttpStatus.BAD_REQUEST);
-      }
-
-      const findByCnpj = await this.companySearchService.getCnpjData(cnpj);
-
-      if (!findByCnpj) {
-        throw new HttpException(
-          'CNPJ inválido ou não encontrado',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-
-      if (findByCnpj.dataAbertura) {
-        const dataAbertura = new Date(findByCnpj.dataAbertura);
-        const hoje = new Date();
-        const diferencaEmMeses =
-          (hoje.getFullYear() - dataAbertura.getFullYear()) * 12 +
-          (hoje.getMonth() - dataAbertura.getMonth());
-
-        if (diferencaEmMeses < 6) {
-          throw new HttpException(
-            'Não é possível registrar empresas com menos de 6 meses de existência. Por favor, tente novamente quando sua empresa atingir este requisito.',
-            HttpStatus.BAD_REQUEST,
-          );
-        }
-      }
-
-      if (findByCnpj.situacao !== 'ATIVA') {
-        throw new HttpException(
-          'CNPJ não está ativo na Receita Federal',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-
-      const hashedPassword = await bcrypt.hash(password, 10);
-      const newUser = this.companyRepository.create({
-        ...userData,
-        isActive: true,
-        isCompleted: true,
-        isOn: true,
-        cnpj: this.formatCNPJ(cnpj),
-        name: this.formatName(name),
-        email,
-        cpf: cpf || null,
-        nameFantasy: this.formatName(nameFantasy),
-        zipcode: findByCnpj.endereco.cep,
-        state: findByCnpj.endereco.uf,
-        city: findByCnpj.endereco.municipio,
-        street: findByCnpj.endereco.logradouro,
-        district: findByCnpj.endereco.bairro,
-        password: hashedPassword,
-      } as DeepPartial<Company>);
-
-      const savedUser = await queryRunner.manager.save(newUser);
-
-      const defaultPlanId = this.configService
-        .get<string>('DEFAULT_COMPANY_PLAN_ID')
-        ?.trim();
-      const planRepository = queryRunner.manager.getRepository(PlansCompany);
-      const plan = await planRepository.findOne({
-        where: defaultPlanId
-          ? { id: defaultPlanId, isTrial: false, status: true }
-          : { isTrial: false, status: true },
-        order: defaultPlanId
-          ? undefined
-          : {
-              value: 'ASC',
-              createdAt: 'ASC',
-            },
-      });
-
-      if (!plan) {
-        throw new HttpException(
-          'Nenhum plano padrão ativo foi configurado',
-          HttpStatus.SERVICE_UNAVAILABLE,
-        );
-      }
-
-      const trialEndDate = new Date();
-      trialEndDate.setMonth(trialEndDate.getMonth() + 1);
-
-      const subscriptionCompany = this.subscriptionCompanyRepository.create({
-        companyId: savedUser.id,
-        status: 1,
-        planId: plan.id,
-        interval: 1,
-        isInTrial: false,
-        amount: plan.value,
-        trialStartDate: new Date(),
-        trialEndDate: trialEndDate,
-        nextRecurrency: trialEndDate.toISOString(),
-        endDate: trialEndDate.toISOString(),
-      });
-
-      await queryRunner.manager.save(subscriptionCompany);
-
-      await queryRunner.commitTransaction();
-
-      return { message: 'Cadastro enviado para análise' };
+      receita = await this.companySearchService.getCnpjData(cnpj);
     } catch (error) {
-      await queryRunner.rollbackTransaction();
-
-      if (error instanceof HttpException) {
-        throw error;
+      if (error instanceof NotFoundException) {
+        return {
+          exists: false,
+          status: 'not_found',
+          message: 'CNPJ não encontrado na Receita Federal.',
+        };
       }
+      return { exists: false, status: 'unavailable' };
+    }
 
+    const ineligible = this.receitaIneligibility(receita);
+    if (ineligible) {
+      return { exists: false, ...ineligible };
+    }
+
+    return {
+      exists: false,
+      status: 'available',
+      razaoSocial: receita.razaoSocial,
+      nomeFantasia: receita.nomeFantasia,
+    };
+  }
+
+  async register(registerDto: RegisterDto): Promise<AuthResponseRegisterDto> {
+    const {
+      cnpj,
+      password,
+      name,
+      nameFantasy,
+      email,
+      cpf,
+      responsibleName,
+      ...userData
+    } = registerDto;
+
+    if (!isValidCnpj(cnpj)) {
+      throw new HttpException('CNPJ inválido', HttpStatus.BAD_REQUEST);
+    }
+
+    const existingCnpj = await this.companyRepository.findOne({
+      where: cnpjLookupVariants(cnpj).map((variant) => ({ cnpj: variant })),
+    });
+    if (existingCnpj) {
+      throw new HttpException('CNPJ já cadastrado', HttpStatus.BAD_REQUEST);
+    }
+
+    const existingEmail = await this.companyRepository.findOne({
+      where: { email },
+    });
+    if (existingEmail) {
+      throw new HttpException('E-mail já cadastrado', HttpStatus.BAD_REQUEST);
+    }
+
+    const findByCnpj = await this.companySearchService.getCnpjData(cnpj);
+
+    const ineligible = this.receitaIneligibility(findByCnpj);
+    if (ineligible) {
+      throw new HttpException(ineligible.message, HttpStatus.BAD_REQUEST);
+    }
+
+    const newCompany = this.companyRepository.create({
+      ...userData,
+      isActive: true,
+      isCompleted: true,
+      isOn: true,
+      cnpj: formatCnpj(cnpj),
+      name: this.formatName(name),
+      email,
+      cpf: cpf || null,
+      phoneNumberJson: responsibleName
+        ? { number: userData.phoneNumber, contact: responsibleName }
+        : undefined,
+      nameFantasy: this.formatName(nameFantasy),
+      zipcode: findByCnpj.endereco.cep,
+      state: findByCnpj.endereco.uf,
+      city: findByCnpj.endereco.municipio,
+      street: findByCnpj.endereco.logradouro,
+      district: findByCnpj.endereco.bairro,
+      password: await bcrypt.hash(password, 10),
+    } as DeepPartial<Company>);
+
+    let savedCompany: Company;
+    try {
+      savedCompany = await this.companyRepository.save(newCompany);
+    } catch (error) {
+      if (error instanceof QueryFailedError && error.driverError?.code === '23505') {
+        throw new HttpException(
+          'CNPJ ou e-mail já cadastrado',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
       throw new HttpException(
         'Não foi possível concluir o cadastro',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
-    } finally {
-      await queryRunner.release();
     }
+
+    const accessToken = await this.generateJwt({
+      username: savedCompany.cnpj,
+      sub: savedCompany.id,
+    });
+
+    return { message: 'Conta criada com sucesso', access_token: accessToken };
+  }
+
+  /** Regras da Receita para aceitar o cadastro: empresa ativa e com 6+ meses. */
+  private receitaIneligibility(
+    receita: ReceitaCnpjData,
+  ): { status: 'inactive' | 'too_new'; message: string } | null {
+    const situacao = (receita.situacao ?? '').trim().toUpperCase();
+    if (situacao !== 'ATIVA') {
+      const label = situacao
+        ? situacao.charAt(0) + situacao.slice(1).toLowerCase()
+        : 'irregular';
+      return {
+        status: 'inactive',
+        message: `Este CNPJ está com situação "${label}" na Receita Federal. Só é possível cadastrar empresas ativas.`,
+      };
+    }
+
+    const openingDate = this.parseReceitaDate(receita.dataAbertura);
+    if (openingDate) {
+      const today = new Date();
+      const months =
+        (today.getFullYear() - openingDate.getFullYear()) * 12 +
+        (today.getMonth() - openingDate.getMonth());
+      if (months < 6) {
+        return {
+          status: 'too_new',
+          message:
+            'Empresas com menos de 6 meses de abertura ainda não podem se cadastrar.',
+        };
+      }
+    }
+
+    return null;
   }
 
   async login(
@@ -196,30 +235,41 @@ export class AuthService {
   ): Promise<AuthResponseDto & { company: boolean }> {
     void ip;
     const { cnpj, password } = loginDto;
-    const user = await this.companyRepository.findOne({ where: { cnpj } });
 
-    if (!user) {
+    if (!isValidCnpj(cnpj)) {
+      throw new HttpException('Informe um CNPJ válido', HttpStatus.BAD_REQUEST);
+    }
+
+    const user = await this.companyRepository.findOne({
+      where: cnpjLookupVariants(cnpj).map((variant) => ({ cnpj: variant })),
+    });
+
+    const isPasswordValid =
+      !!user?.password && (await bcrypt.compare(password, user.password));
+
+    if (!user || !isPasswordValid) {
       throw new HttpException('Credenciais inválidas', HttpStatus.UNAUTHORIZED);
     }
 
     if (!user.isActive) {
       throw new HttpException(
-        'Cadastro encontra-se em análise',
-        HttpStatus.BAD_REQUEST,
+        'Conta desativada. Entre em contato com o suporte.',
+        HttpStatus.FORBIDDEN,
       );
     }
 
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-
-    if (!isPasswordValid) {
-      throw new HttpException('Credenciais inválidas', HttpStatus.UNAUTHORIZED);
-    }
-
-    await this.companyRepository.save(user);
-    const payload = { username: user.cnpj, sub: user.id };
-    const token = await this.generateJwt(payload);
+    const token = await this.generateJwt({ username: user.cnpj, sub: user.id });
 
     return { access_token: token, company: true };
+  }
+
+  /** A ReceitaWS devolve datas no formato DD/MM/AAAA. */
+  private parseReceitaDate(value?: string | null): Date | null {
+    const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec((value ?? '').trim());
+    if (!match) return null;
+    const [, day, month, year] = match;
+    const date = new Date(Number(year), Number(month) - 1, Number(day));
+    return Number.isNaN(date.getTime()) ? null : date;
   }
 
   async changePassword(
@@ -293,20 +343,6 @@ export class AuthService {
         return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
       })
       .join(' ');
-  }
-
-  private formatCNPJ(cnpj: string): string {
-    if (!cnpj) return '';
-
-    const cleaned = cnpj.replace(/\D/g, '');
-    if (cleaned.length === 14) {
-      return cleaned.replace(
-        /^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/,
-        '$1.$2.$3/$4-$5',
-      );
-    }
-
-    return cnpj;
   }
 
   async generateRecoveryCodeAndSendNumber(
@@ -568,13 +604,9 @@ export class AuthService {
           'street',
           'number',
           'isOn',
+          'onboardingCompletedAt',
         ],
-        relations: [
-          'contacts',
-          'CompanyUsersContacts',
-          'subscription',
-          'subscription.plan',
-        ],
+        relations: ['contacts', 'CompanyUsersContacts'],
       });
 
       if (!user) {
@@ -584,64 +616,6 @@ export class AuthService {
       return user;
     } catch (error) {
       throw new HttpException(error, HttpStatus.UNAUTHORIZED);
-    }
-  }
-
-  async getBeneficitsUser(userId: string) {
-    try {
-      const subscription = await this.subscriptionCompanyRepository.findOne({
-        where: { companyId: userId },
-        relations: ['plan', 'plan.featureLimits', 'plan.featureLimits.feature'],
-      });
-
-      if (!subscription) {
-        return [
-          {
-            name: 'Sem assinatura ativa',
-            quantityUsed: 0,
-            limit: 0,
-            remaining: 0,
-            description: 'O usuário ainda não possui uma assinatura ativa',
-            isUnlimited: false,
-          },
-        ];
-      }
-
-      const featureUsageUser = await this.featureUsageRepository.find({
-        where: { subscriptionId: subscription.id },
-        relations: ['feature'],
-      });
-
-      const benefits = subscription.plan.featureLimits.map((limit) => {
-        const usage = featureUsageUser.find(
-          (u) => u.featureId === limit.featureId,
-        ) || {
-          quantityUsed: 0,
-          feature: limit.feature,
-        };
-
-        return {
-          name: limit.feature.name,
-          quantityUsed: usage.quantityUsed,
-          limit: limit.monthlyLimit,
-          remaining:
-            limit.monthlyLimit !== null
-              ? Math.max(0, limit.monthlyLimit - usage.quantityUsed)
-              : null,
-          description: limit.feature.description,
-          isUnlimited: limit.monthlyLimit === null,
-        };
-      });
-
-      return benefits;
-    } catch (error) {
-      if (error instanceof HttpException) {
-        throw error;
-      }
-      throw new HttpException(
-        'Erro ao buscar benefícios',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
     }
   }
 
@@ -771,7 +745,7 @@ export class AuthService {
       });
 
       await this.companyRepository.update(company.id, {
-        cnpj: this.formatCNPJ(cnpj),
+        cnpj: formatCnpj(cnpj),
       });
 
       return {

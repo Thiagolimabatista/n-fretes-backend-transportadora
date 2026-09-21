@@ -1,9 +1,19 @@
-import { Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Notification } from '@entities/notifications.entity';
-import { NotificationStatus } from '@entities/notifications.entity';
-import { ParamsNotificationsRequest } from './interfaces/INotificationParams';
+import { Not, Repository } from 'typeorm';
+import {
+  EntityType,
+  Notification,
+  NotificationStatus,
+} from '@entities/notifications.entity';
+import { ListNotificationsQueryDto } from './dto/list-notifications.dto';
+
+/** Este backend só atende empresas (transportadoras). */
+const RECIPIENT_TYPE = EntityType.COMPANY;
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
 
 @Injectable()
 export class NotificationService {
@@ -12,21 +22,20 @@ export class NotificationService {
     private notificationRepository: Repository<Notification>,
   ) {}
 
-  async getNotifications(
-    recipientId: string,
-    params?: ParamsNotificationsRequest,
-  ) {
-    const { category, status, page = 1, take = 10 } = params || {};
-    const skip = (page - 1) * take;
+  async getNotifications(recipientId: string, params: ListNotificationsQueryDto) {
+    const { category, status, search, page = 1, take = 10 } = params;
 
     const queryBuilder = this.notificationRepository
       .createQueryBuilder('notifications')
       .where('notifications.recipientId = :recipientId', { recipientId })
+      .andWhere('notifications.recipientType = :recipientType', {
+        recipientType: RECIPIENT_TYPE,
+      })
       .andWhere('notifications.status != :deletedStatus', {
-        deletedStatus: 'deleted',
+        deletedStatus: NotificationStatus.DELETED,
       })
       .orderBy('notifications.created_at', 'DESC')
-      .skip(skip)
+      .skip((page - 1) * take)
       .take(take);
 
     if (category) {
@@ -34,6 +43,12 @@ export class NotificationService {
     }
     if (status) {
       queryBuilder.andWhere('notifications.status = :status', { status });
+    }
+    if (search) {
+      queryBuilder.andWhere(
+        '(notifications.title ILIKE :search OR notifications.message ILIKE :search)',
+        { search: `%${escapeLike(search)}%` },
+      );
     }
 
     const [data, total] = await queryBuilder.getManyAndCount();
@@ -46,28 +61,65 @@ export class NotificationService {
     };
   }
 
-  async markAsRead(id: string, recipientId: string) {
-    const notification = await this.notificationRepository.findOne({
-      where: { id, recipientId, status: NotificationStatus.UNREAD },
+  async countUnread(recipientId: string): Promise<{ count: number }> {
+    const count = await this.notificationRepository.count({
+      where: {
+        recipientId,
+        recipientType: RECIPIENT_TYPE,
+        status: NotificationStatus.UNREAD,
+      },
     });
+    return { count };
+  }
 
-    if (notification) {
+  async markAsRead(id: string, recipientId: string) {
+    const notification = await this.findOwned(id, recipientId);
+
+    if (notification.status === NotificationStatus.UNREAD) {
       notification.status = NotificationStatus.READ;
       notification.readAt = new Date();
       return this.notificationRepository.save(notification);
     }
-    return null;
+    return notification;
+  }
+
+  async markAllAsRead(recipientId: string): Promise<{ updated: number }> {
+    const result = await this.notificationRepository.update(
+      {
+        recipientId,
+        recipientType: RECIPIENT_TYPE,
+        status: NotificationStatus.UNREAD,
+      },
+      { status: NotificationStatus.READ, readAt: new Date() },
+    );
+    return { updated: result.affected ?? 0 };
   }
 
   async deleteNotification(id: string, recipientId: string) {
+    const notification = await this.findOwned(id, recipientId);
+
+    notification.status = NotificationStatus.DELETED;
+    notification.readAt = notification.readAt ?? new Date();
+    await this.notificationRepository.save(notification);
+    return { id: notification.id, status: notification.status };
+  }
+
+  private async findOwned(id: string, recipientId: string) {
     const notification = await this.notificationRepository.findOne({
-      where: { id, recipientId, status: NotificationStatus.READ },
+      where: {
+        id,
+        recipientId,
+        recipientType: RECIPIENT_TYPE,
+        status: Not(NotificationStatus.DELETED),
+      },
     });
 
-    if (notification) {
-      notification.status = NotificationStatus.DELETED;
-      return this.notificationRepository.save(notification);
+    if (!notification) {
+      throw new HttpException(
+        'Notificação não encontrada',
+        HttpStatus.NOT_FOUND,
+      );
     }
-    return null;
+    return notification;
   }
 }

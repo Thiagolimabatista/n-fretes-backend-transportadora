@@ -7,18 +7,6 @@ import { ApiTags } from '@nestjs/swagger';
 export class SqsController {
   constructor(private readonly sqsService: SQSService) {}
 
-  @Post('freight-sharing')
-  async notifyFreightSharing(
-    @Body() body: { freightId: string; userIds: string[] },
-  ) {
-    await this.sqsService.notifyFreightSharing(body.freightId, body.userIds);
-
-    return {
-      status: 'success',
-      message: 'Frete compartilhado com sucesso',
-    };
-  }
-
   @Post('freight-scraper')
   async sendToFreightScraper(@Body() body: any) {
     await this.sqsService.sendToFreightScraperQueue(body);

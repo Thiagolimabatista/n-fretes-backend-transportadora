@@ -249,10 +249,6 @@ export class SQSConsumerService implements OnModuleInit, OnModuleDestroy {
           await this.handleFreightSharingNotification(messageBody);
           break;
 
-        case 'FREIGHT_USERS':
-          await this.handleFreightUsersMessage(messageBody);
-          break;
-
         case 'FREIGHT_SCRAPER':
           await this.handleFreightScraperMessage(messageBody);
           break;
@@ -285,24 +281,6 @@ export class SQSConsumerService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       this.logger.error(
         '❌ Erro em handleFreightSharingNotification:',
-        error.message || error,
-      );
-      throw error;
-    }
-  }
-
-  private async handleFreightUsersMessage(messageBody: any): Promise<void> {
-    try {
-      this.logger.log('👥 Processando compartilhamento de frete:', messageBody);
-
-      const { freightId, tokens } = messageBody;
-
-      this.logger.log(
-        `Notificando ${tokens?.length || 0} usuários sobre frete ${freightId}`,
-      );
-    } catch (error) {
-      this.logger.error(
-        '❌ Erro em handleFreightUsersMessage:',
         error.message || error,
       );
       throw error;

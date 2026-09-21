@@ -75,35 +75,6 @@ export class SdrContactDto {
   isActive: boolean;
 }
 
-export class SdrSubscriptionStatusDto {
-  @ApiProperty({
-    description: 'Status da assinatura',
-    example: 'Ativo',
-    enum: ['Ativo', 'Inativado', 'Vencido', 'Sem assinatura'],
-  })
-  statusLabel: 'Ativo' | 'Inativado' | 'Vencido' | 'Sem assinatura';
-
-  @ApiProperty({
-    description: 'Indica se a assinatura está ativa',
-    example: true,
-  })
-  isActive: boolean;
-
-  @ApiProperty({
-    description: 'Nome do plano da assinatura',
-    example: 'Plano Ouro',
-    nullable: true,
-  })
-  planName: string | null;
-
-  @ApiProperty({
-    description: 'Próxima data de renovação (preenchida apenas quando Ativo)',
-    example: '2026-04-01T00:00:00.000Z',
-    nullable: true,
-  })
-  nextRecurrency: string | null;
-}
-
 export class SdrCompanyDto {
   @ApiProperty({
     description: 'Identificador único da empresa',
@@ -145,11 +116,6 @@ export class SdrCompanyDto {
   })
   contacts: SdrContactDto[];
 
-  @ApiProperty({
-    description: 'Informações sobre o status da assinatura da empresa',
-    type: SdrSubscriptionStatusDto,
-  })
-  subscription: SdrSubscriptionStatusDto;
 
   @ApiProperty({
     description: 'Data de cadastro da empresa',

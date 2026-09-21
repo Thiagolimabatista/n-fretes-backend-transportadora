@@ -1,8 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { isAxiosError } from 'axios';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 
 const QUALP_BASE_URL = 'https://api.qualp.com.br/rotas/v4';
+
+const TOLL_UNAVAILABLE_MESSAGE =
+  'O cálculo de pedágio está indisponível no momento. Tente novamente mais tarde.';
 
 // ---------- Tipos da resposta bruta da API QUALP ----------
 
@@ -162,15 +166,24 @@ export class QualpService {
 
     this.logger.log(`Chamando API QUALP para: ${params.locations.join(' → ')}`);
 
-    const response = await firstValueFrom(
-      this.httpService.get<QualpApiResponse>(url, {
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          'Access-Token': apiKey,
-        },
-      }),
-    );
+    let response: { data: QualpApiResponse };
+    try {
+      response = await firstValueFrom(
+        this.httpService.get<QualpApiResponse>(url, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            'Access-Token': apiKey,
+          },
+        }),
+      );
+    } catch (error) {
+      const upstream = isAxiosError(error)
+        ? `HTTP ${error.response?.status ?? '-'}: ${JSON.stringify(error.response?.data ?? error.message)}`
+        : String(error);
+      this.logger.error(`QUALP falhou (${params.locations.join(' → ')}): ${upstream}`);
+      throw new HttpException(TOLL_UNAVAILABLE_MESSAGE, HttpStatus.SERVICE_UNAVAILABLE);
+    }
 
     const data = response.data;
 

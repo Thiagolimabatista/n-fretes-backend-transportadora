@@ -7,8 +7,6 @@ export class SQSService {
   private sqsClient: SQSClient;
   private readonly queueUrlFreightSharing =
     process.env.QUEUE_SHARING_NOTIFICATION_FREIGHT;
-  private readonly queueSharingFreightUsers =
-    process.env.QUEUE_SHARIGIN_FREIGHT_USERS;
   private readonly freightScraperQueue = process.env.FREIGHT_SCRAPER_QUEUE;
 
   constructor(private configService: ConfigService) {
@@ -38,24 +36,6 @@ export class SQSService {
     } catch (error) {
       console.error('Error sending message to SQS:', error);
       throw error;
-    }
-  }
-
-  async notifyFreightSharing(
-    freightId: string,
-    tokens: string[],
-  ): Promise<void> {
-    try {
-      const payload = {
-        freightId,
-        tokens,
-        timestamp: new Date().toISOString(),
-      };
-
-      await this.sendMessage(this.queueSharingFreightUsers, payload);
-    } catch (error) {
-      console.log(error);
-      throw new HttpException(error, HttpStatus.BAD_REQUEST);
     }
   }
 

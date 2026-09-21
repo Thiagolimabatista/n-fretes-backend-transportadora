@@ -1,9 +1,21 @@
-import { Body, Controller, UseGuards, Put, Get, Patch } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  UseGuards,
+  Put,
+  Get,
+  Patch,
+  Param,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
 
 import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
 
-import { CompanyService } from './company.service';
+import {
+  CompanyPublicProfile,
+  CompanyService,
+  CompanyUpdateResponse,
+} from './company.service';
 import { GetUserId } from 'src/decorators/get-user-decorator';
 import { companyUpdateDto } from './dto/Company.dto';
 import { companyUpdateDtoSwagger } from 'src/common/company-swagger/company-swagger';
@@ -28,7 +40,7 @@ export class CompanyController {
   async updatePlan(
     @GetUserId() userId: string,
     @Body() body: companyUpdateDto,
-  ): Promise<{ message: string }> {
+  ): Promise<CompanyUpdateResponse> {
     return this.companyService.updateUserIdCompany(userId, body);
   }
 
@@ -85,36 +97,38 @@ export class CompanyController {
   /********************************************************************************** */
 
   @UseGuards(JwtAuthGuard)
-  @Get('subscription-validity')
+  @Get(':id/profile')
   @ApiOperation({
-    summary: 'Verificar validade da assinatura',
+    summary: 'Perfil público da transportadora',
     description:
-      'Verifica se a assinatura da empresa está válida, checando o trialEndDate e status',
+      'Nome, cidade, data de cadastro, total de fretes ativos/publicados e todos os contatos responsáveis pelos fretes da transportadora.',
+  })
+  @ApiResponse({ status: 200, description: 'Perfil encontrado' })
+  @ApiResponse({ status: 404, description: 'Transportadora não encontrada' })
+  async getPublicProfile(
+    @Param('id') id: string,
+  ): Promise<CompanyPublicProfile> {
+    return this.companyService.getPublicProfile(id);
+  }
+
+  /********************************************************************************** */
+
+  @UseGuards(JwtAuthGuard)
+  @Patch('onboarding/complete')
+  @ApiOperation({
+    summary: 'Concluir primeiro acesso',
+    description:
+      'Registra que a empresa já viu o convite para cadastrar o primeiro frete, para ele não reaparecer.',
   })
   @ApiResponse({
     status: 200,
-    description: 'Validade verificada com sucesso',
     schema: {
-      example: {
-        isValid: true,
-        status: 1,
-        isInTrial: true,
-        trialEndDate: '2026-02-23T00:00:00.000Z',
-        message: 'Assinatura em período trial válido',
-      },
+      example: { onboardingCompletedAt: '2026-09-21T12:00:00.000Z' },
     },
   })
-  @ApiResponse({
-    status: 500,
-    description: 'Erro ao verificar validade',
-  })
-  async checkSubscriptionValidity(@GetUserId() userId: string): Promise<{
-    isValid: boolean;
-    status: number;
-    isInTrial: boolean;
-    trialEndDate: Date | null;
-    message: string;
-  }> {
-    return this.companyService.checkSubscriptionValidity(userId);
+  async completeOnboarding(
+    @GetUserId() userId: string,
+  ): Promise<{ onboardingCompletedAt: Date }> {
+    return this.companyService.completeOnboarding(userId);
   }
 }

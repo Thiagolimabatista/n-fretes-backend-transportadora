@@ -3,7 +3,6 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Between, MoreThanOrEqual, LessThanOrEqual } from 'typeorm';
 import { Company } from '@entities/company.entity';
 import { ContactCompany } from '@entities/contact-company.entity';
-import { SubscriptionCompany } from '@entities/subscription-company.entity';
 import { Freight } from '@entities/freight.entity';
 import { FreightRequest } from '@entities/freight-requests.entity';
 import { UsersDrive } from '@entities/users-drive.entity';
@@ -13,7 +12,6 @@ import {
   SdrCompanyListResponseDto,
   SdrCompanyDto,
   SdrContactDto,
-  SdrSubscriptionStatusDto,
 } from './dto/sdr-company-list.dto';
 import {
   SdrPostHistoryResponseDto,
@@ -57,8 +55,6 @@ export class SdrService {
     private readonly companyRepository: Repository<Company>,
     @InjectRepository(ContactCompany)
     private readonly contactCompanyRepository: Repository<ContactCompany>,
-    @InjectRepository(SubscriptionCompany)
-    private readonly subscriptionCompanyRepository: Repository<SubscriptionCompany>,
     @InjectRepository(Freight)
     private readonly freightRepository: Repository<Freight>,
     @InjectRepository(FreightRequest)
@@ -98,12 +94,7 @@ export class SdrService {
           select: ['id', 'name', 'phoneNumber', 'isActive'],
         });
 
-        const subscription = await this.subscriptionCompanyRepository.findOne({
-          where: { companyId: company.id },
-          relations: ['plan'],
-        });
-
-        return this.mapCompanyToDto(company, contacts, subscription);
+        return this.mapCompanyToDto(company, contacts);
       }),
     );
 
@@ -121,7 +112,6 @@ export class SdrService {
   private mapCompanyToDto(
     company: Company,
     contacts: ContactCompany[],
-    subscription: SubscriptionCompany | null,
   ): SdrCompanyDto {
     const contactsDto: SdrContactDto[] = contacts.map((contact) => ({
       id: contact.id,
@@ -130,10 +120,6 @@ export class SdrService {
       isActive: contact.isActive,
     }));
 
-    const subscriptionDto: SdrSubscriptionStatusDto = this.mapSubscriptionToDto(
-      subscription,
-    );
-
     return {
       id: company.id,
       name: company.name,
@@ -141,76 +127,10 @@ export class SdrService {
       cnpj: company.cnpj,
       phoneNumber: company.phoneNumber,
       contacts: contactsDto,
-      subscription: subscriptionDto,
       createdAt: company.createdAt,
       isActive: company.isActive,
       isCompleted: company.isCompleted,
     };
-  }
-
-  private mapSubscriptionToDto(
-    subscription: SubscriptionCompany | null,
-  ): SdrSubscriptionStatusDto {
-    if (!subscription) {
-      return {
-        statusLabel: 'Sem assinatura',
-        isActive: false,
-        planName: null,
-        nextRecurrency: null,
-      };
-    }
-
-    const statusCode = subscription.status ?? null;
-    let statusLabel: 'Ativo' | 'Inativado' | 'Vencido' | 'Sem assinatura';
-
-    if (statusCode === 1) {
-      statusLabel = 'Ativo';
-    } else if (statusCode === 2) {
-      statusLabel = 'Inativado';
-    } else if (statusCode === 3) {
-      statusLabel = 'Vencido';
-    } else {
-      statusLabel = 'Sem assinatura';
-    }
-
-    const isActive = statusCode === 1;
-
-    return {
-      statusLabel,
-      isActive,
-      planName: subscription.plan?.name || null,
-      nextRecurrency: isActive ? (subscription.nextRecurrency ?? null) : null,
-    };
-  }
-
-  private checkIfExpiringSoon(
-    nextRecurrency: string | null,
-    endDate: string | null,
-  ): boolean {
-    const now = new Date();
-    const daysToCheck = 7;
-
-    if (nextRecurrency) {
-      const nextDate = new Date(nextRecurrency);
-      const diffTime = nextDate.getTime() - now.getTime();
-      const diffDays = diffTime / (1000 * 60 * 60 * 24);
-
-      if (diffDays <= daysToCheck && diffDays >= 0) {
-        return true;
-      }
-    }
-
-    if (endDate) {
-      const expirationDate = new Date(endDate);
-      const diffTime = expirationDate.getTime() - now.getTime();
-      const diffDays = diffTime / (1000 * 60 * 60 * 24);
-
-      if (diffDays <= daysToCheck && diffDays >= 0) {
-        return true;
-      }
-    }
-
-    return false;
   }
 
   async getCompanyPostHistory(

@@ -23,6 +23,16 @@ export class RegisterDto {
   @MaxLength(150)
   nameFantasy?: string;
 
+  @ApiPropertyOptional({
+    description: 'Nome de quem administra a conta',
+    example: 'Maria Souza',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(150)
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  responsibleName?: string;
+
   @ApiProperty({ description: 'Email do usuário', example: 'email@gmail.com' })
   @IsNotEmpty()
   @IsEmail()

@@ -6,12 +6,11 @@ import {
   IsBoolean,
   IsArray,
   IsNumber,
-  IsDateString,
+  ArrayNotEmpty,
 } from 'class-validator';
 import { ApiProperty, PartialType } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
-  FreightLocal,
   PaymentMethod,
   SpecieOfLoad,
   Toll,
@@ -20,16 +19,15 @@ import {
 } from 'src/enum/freight';
 import { BodyType, VehicleType } from 'src/enum/vehicle';
 
-export class CreateFreightDto {
-  @ApiProperty({
-    description: 'Localização de envio',
-    enum: FreightLocal,
-    default: FreightLocal.NATIONAL,
-  })
-  @IsEnum(FreightLocal)
-  @IsOptional()
-  shippingLocation?: FreightLocal;
+/** Placeholders de select ("" / "DEFAULT") significam "não informado". */
+const emptySelectToUndefined = ({ value }: { value: unknown }) =>
+  value === '' || value === 'DEFAULT' || value === null ? undefined : value;
 
+/** Aceita a grafia com crase enviada por versões antigas do front. */
+const normalizeToll = ({ value }: { value: unknown }) =>
+  value === 'Pago à parte' ? Toll.PAYMENTPARTY : value;
+
+export class CreateFreightDto {
   @ApiProperty({ description: 'Cidade de origem', required: false })
   @IsString()
   @IsOptional()
@@ -121,6 +119,7 @@ export class CreateFreightDto {
     description: 'Tipo de carga ANTT (ex: Carga Geral, Granel sólido, Frigorificada ou Aquecida...)',
     required: false,
   })
+  @Transform(emptySelectToUndefined)
   @IsString()
   @IsOptional()
   anttLoadType?: string;
@@ -130,11 +129,27 @@ export class CreateFreightDto {
   @IsOptional()
   weightOfLoad?: string;
 
+  @ApiProperty({ description: 'Comprimento da carga (m)', required: false })
+  @IsString()
+  @IsOptional()
+  weightOfLoadLenght?: string;
+
+  @ApiProperty({ description: 'Largura da carga (m)', required: false })
+  @IsString()
+  @IsOptional()
+  weightOfLoadWidth?: string;
+
+  @ApiProperty({ description: 'Altura da carga (m)', required: false })
+  @IsString()
+  @IsOptional()
+  weightOfLoadHeight?: string;
+
   @ApiProperty({
     description: 'Unidade métrica',
     enum: UnityMetric,
     required: false,
   })
+  @Transform(emptySelectToUndefined)
   @IsEnum(UnityMetric)
   @IsOptional()
   unityMetric?: UnityMetric;
@@ -200,8 +215,8 @@ export class CreateFreightDto {
     required: false,
   })
   @IsArray()
+  @ArrayNotEmpty({ message: 'Selecione pelo menos um tipo de veículo' })
   @IsEnum(VehicleType, { each: true })
-  @IsNotEmpty()
   vehicleTypes?: VehicleType[];
 
   @ApiProperty({
@@ -211,8 +226,8 @@ export class CreateFreightDto {
     required: false,
   })
   @IsArray()
+  @ArrayNotEmpty({ message: 'Selecione pelo menos um tipo de carroceria' })
   @IsEnum(BodyType, { each: true })
-  @IsNotEmpty()
   bodyTypes?: BodyType[];
 
   @ApiProperty({
@@ -239,6 +254,7 @@ export class CreateFreightDto {
     enum: Toll,
     required: false,
   })
+  @Transform(normalizeToll)
   @IsEnum(Toll)
   @IsNotEmpty()
   Toll?: Toll;
@@ -253,6 +269,16 @@ export class CreateFreightDto {
     required: false,
     type: 'number',
     default: 0,
+  })
+  @IsNumber()
+  @IsOptional()
+  valueAdvance?: number;
+
+  @ApiProperty({
+    description: 'Alias legado de valueAdvance',
+    required: false,
+    type: 'number',
+    deprecated: true,
   })
   @IsNumber()
   @IsOptional()
@@ -277,14 +303,14 @@ export class CreateFreightDto {
   @IsOptional()
   openSolicitations?: boolean;
 
-  @ApiProperty({ description: 'ID da empresa', required: false })
+  @ApiProperty({
+    description:
+      'ID do responsável (contato da empresa). Opcional: empresas recém-criadas ainda não têm contatos.',
+    required: false,
+  })
+  @Transform(emptySelectToUndefined)
   @IsString()
   @IsOptional()
-  companyId?: string;
-
-  @ApiProperty({ description: 'ID do contato da empresa', required: false })
-  @IsString()
-  @IsNotEmpty()
   contactCompanyId?: string;
 
   @ApiProperty({
@@ -310,41 +336,10 @@ export class CreateFreightDto {
   @IsString({ each: true })
   contactCompanyIds?: string[];
 
-  @ApiProperty({
-    description: 'IDs dos grupos de contato',
-    required: false,
-    isArray: true,
-    type: 'string',
-  })
-  @IsArray()
-  @IsOptional()
-  @IsString({ each: true })
-  contactGroupIds?: string[];
-
-  @ApiProperty({
-    description: 'Frete público (true) ou restrito (false)',
-    required: false,
-    default: true,
-  })
-  @IsBoolean()
-  @IsOptional()
-  isPublic?: boolean;
-
-  @ApiProperty({
-    description: 'Permitir compartilhamento do frete',
-    required: false,
-    default: true,
-  })
-  @IsBoolean()
-  @IsOptional()
-  isToShare?: boolean;
-
-  
   @ApiProperty({ description: 'Rota de destino', required: false })
   @IsString()
   @IsOptional()
   routeCacheId?: string;
-  
 }
 
 export class UpdateFreightDto extends PartialType(CreateFreightDto) {}

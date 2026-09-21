@@ -11,14 +11,11 @@ import {
 
 import { ContactCompany } from './contact-company.entity';
 import { Freight } from './freight.entity';
-import { SubscriptionCompany } from './subscription-company.entity';
 import { CompanyUsersContacts } from './company-users-contacts.entity';
 import { FreightRequest } from './freight-requests.entity';
 import { FreightRoutes } from './freight-routes.entity';
 import { ReviewUserDrive } from './review-users-drive.entity';
 import { UsersFavoritesCompany } from './users-favorites-company.entity';
-import { Transactions } from './transactions.entity';
-import { CreditCard } from './credit-card.entity';
 
 @Entity({ schema: 'public', name: 'company' })
 export class Company {
@@ -117,9 +114,6 @@ export class Company {
   photoUrl: string;
 
   @Column({ nullable: true })
-  assas_id: string;
-
-  @Column({ nullable: true })
   siimpUsername: string;
 
   @Column({ nullable: true })
@@ -128,9 +122,12 @@ export class Company {
   @Column({ nullable: true })
   userPhotoURL: string;
 
-
   @Column({ default: false })
   siimpIntegrationActive: boolean;
+
+  /** Quando a empresa concluiu (ou dispensou) o convite de primeiro frete. */
+  @Column({ type: 'timestamp', nullable: true })
+  onboardingCompletedAt: Date | null;
 
   @OneToMany(() => ContactCompany, (contact) => contact.company)
   contacts: ContactCompany[];
@@ -143,9 +140,6 @@ export class Company {
 
   @OneToMany(() => Freight, (freight) => freight.company)
   freights: Freight[];
-
-  @OneToOne(() => SubscriptionCompany, (subscription) => subscription.company)
-  subscription: SubscriptionCompany;
 
   @OneToMany(() => CompanyUsersContacts, (company) => company.contacts)
   CompanyUsersContacts: CompanyUsersContacts[];
@@ -161,10 +155,4 @@ export class Company {
     (reviewUserDrive) => reviewUserDrive.company,
   )
   reviewUserDrive: ReviewUserDrive[];
-
-  @OneToMany(() => Transactions, (transaction) => transaction.company)
-  transactions: Transactions[];
-
-  @OneToMany(() => CreditCard, (creditCard) => creditCard.company)
-  creditCard: CreditCard[];
 }

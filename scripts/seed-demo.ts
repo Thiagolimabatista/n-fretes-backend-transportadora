@@ -8,7 +8,7 @@
  *
  * Credenciais criadas:
  *   CNPJ  45.723.174/0001-10
- *   Senha Demo@2026
+ *   Senha definida em DEMO_COMPANY_PASSWORD (mínimo 12 caracteres)
  *
  * O script é idempotente: remove os dados de demo (ids com prefixo "demo-")
  * antes de recriá-los. Por segurança, só roda contra localhost, a menos que
@@ -18,8 +18,6 @@
 import * as bcrypt from 'bcrypt';
 import { connectionSource } from '../src/config/typeorm';
 import { Company } from '../src/entities/company.entity';
-import { SubscriptionCompany } from '../src/entities/subscription-company.entity';
-import { PlansCompany } from '../src/entities/plans-company.entity';
 import { UsersDrive } from '../src/entities/users-drive.entity';
 import { Vehicle } from '../src/entities/vehicles.entity';
 import { CompanyUsersContacts } from '../src/entities/company-users-contacts.entity';
@@ -57,7 +55,6 @@ import { BodyType, VehicleType } from '../src/enum/vehicle';
 const COMPANY_ID = 'demo-company-0000-0000-000000000001';
 const COMPANY_CNPJ = '45.723.174/0001-10';
 const COMPANY_PASSWORD = process.env.DEMO_COMPANY_PASSWORD;
-const DEFAULT_PLAN_ID = '3f58f0d0-6b81-4af8-a1ef-0b3f34a46301';
 
 const DAY = 24 * 60 * 60 * 1000;
 const now = new Date();
@@ -152,11 +149,12 @@ async function cleanup(): Promise<void> {
       [COMPANY_ID],
     ],
     [
-      `DELETE FROM "subscription-company" WHERE id LIKE 'demo-%' OR "companyId" = $1`,
+      // Assinaturas criadas por versões anteriores do seed (FK para company).
+      `DELETE FROM "subscription-company" WHERE id LIKE 'demo-%' OR "companyId" LIKE 'demo-%' OR "companyId" = $1`,
       [COMPANY_ID],
     ],
     [
-      `DELETE FROM company WHERE id = $1 OR cnpj = $2`,
+      `DELETE FROM company WHERE id LIKE 'demo-%' OR id = $1 OR cnpj = $2`,
       [COMPANY_ID, COMPANY_CNPJ],
     ],
   ];
@@ -212,34 +210,133 @@ async function main(): Promise<void> {
       state: 'MG',
       country: 'Brasil',
       district: 'Brasil',
+      onboardingCompletedAt: daysAgo(30),
     }),
   );
 
-  // ── Assinatura ligada ao plano padrão ─────────────────────────────────────
-  const planRepo = connectionSource.getRepository(PlansCompany);
-  const plan =
-    (await planRepo.findOne({ where: { id: DEFAULT_PLAN_ID } })) ??
-    (await planRepo.findOne({ where: {} }));
-  if (plan) {
-    const subscriptionRepo =
-      connectionSource.getRepository(SubscriptionCompany);
-    await subscriptionRepo.save(
-      subscriptionRepo.create({
-        id: 'demo-subscription-000000000001',
-        status: 1,
-        planId: plan.id,
-        companyId: company.id,
-        amount: Number(plan.value ?? 0),
-        interval: 1,
-        isInTrial: false,
-        trialStartDate: daysAgo(30),
-        trialEndDate: daysAhead(335),
-        nextRecurrency: daysAhead(30).toISOString(),
-        endDate: daysAhead(30).toISOString(),
+  // ── Transportadoras extras (login próprio + fretes públicos) ─────────────
+  interface ExtraCompanySeed {
+    key: string;
+    name: string;
+    nameFantasy: string;
+    cnpj: string;
+    email: string;
+    city: CityPoint;
+    freights: Array<{
+      key: string;
+      destiny: CityPoint;
+      product: string;
+      specie: SpecieOfLoad;
+      weightKg: number;
+      value: number;
+      vehicleTypes: VehicleType[];
+      bodyTypes: BodyType[];
+      isFeatured?: boolean;
+    }>;
+  }
+
+  const extraCompanySeeds: ExtraCompanySeed[] = [
+    {
+      key: 'rotasul',
+      name: 'Rota Sul Logística LTDA',
+      nameFantasy: 'Rota Sul',
+      cnpj: '11.222.333/0001-81',
+      email: 'rotasul.demo@nfretes.com.br',
+      city: CITIES.curitiba,
+      freights: [
+        { key: 'rs-madeira', destiny: CITIES.saopaulo, product: 'Madeira serrada', specie: SpecieOfLoad.UNITYS, weightKg: 25000, value: 5900, vehicleTypes: [VehicleType.CART], bodyTypes: [BodyType.LOW_GRILLE], isFeatured: true },
+        { key: 'rs-frango', destiny: CITIES.campinas, product: 'Frango congelado', specie: SpecieOfLoad.BOX, weightKg: 15000, value: 6800, vehicleTypes: [VehicleType.TRUCK], bodyTypes: [BodyType.REFRIGERATED_CHEST] },
+        { key: 'rs-papel', destiny: CITIES.bh, product: 'Bobinas de papel', specie: SpecieOfLoad.COIL, weightKg: 27000, value: 7400, vehicleTypes: [VehicleType.CART, VehicleType.CART_LS], bodyTypes: [BodyType.SIDER] },
+      ],
+    },
+    {
+      key: 'transminas',
+      name: 'TransMinas Cargas e Encomendas LTDA',
+      nameFantasy: 'TransMinas',
+      cnpj: '04.252.011/0001-10',
+      email: 'transminas.demo@nfretes.com.br',
+      city: CITIES.bh,
+      freights: [
+        { key: 'tm-cafe', destiny: CITIES.saopaulo, product: 'Café em sacas', specie: SpecieOfLoad.BAGS, weightKg: 28000, value: 6300, vehicleTypes: [VehicleType.CART, VehicleType.BI_TRAIN], bodyTypes: [BodyType.BULK_CARRIER, BodyType.SIDER], isFeatured: true },
+        { key: 'tm-siderurgia', destiny: CITIES.curitiba, product: 'Bobinas de aço', specie: SpecieOfLoad.COIL, weightKg: 30000, value: 9200, vehicleTypes: [VehicleType.CART_LS], bodyTypes: [BodyType.LOW_GRILLE] },
+        { key: 'tm-laticinios', destiny: CITIES.brasilia, product: 'Laticínios refrigerados', specie: SpecieOfLoad.BOX, weightKg: 12000, value: 5100, vehicleTypes: [VehicleType.TRUCK], bodyTypes: [BodyType.REFRIGERATED_CHEST] },
+      ],
+    },
+  ];
+
+  const freightRepoEarly = connectionSource.getRepository(Freight);
+
+  for (const extra of extraCompanySeeds) {
+    const extraCompany = await companyRepo.save(
+      companyRepo.create({
+        id: `demo-company-${extra.key}`,
+        name: extra.name,
+        nameFantasy: extra.nameFantasy,
+        email: extra.email,
+        phoneNumber: '+5534999990001',
+        phoneContact: '(34) 99999-0001',
+        cnpj: extra.cnpj,
+        transportCategory: 'ETC — Empresa de Transporte de Cargas',
+        password: await bcrypt.hash(COMPANY_PASSWORD, 10),
+        isActive: true,
+        isCompleted: true,
+        isSucess: true,
+        isOn: true,
+        antt: `RNTRC 9${extra.key.length}345678`,
+        zipcode: '80000-000',
+        street: 'Av. das Transportadoras',
+        number: '100',
+        city: extra.city.city,
+        state: extra.city.state,
+        country: 'Brasil',
+        district: 'Centro',
+        onboardingCompletedAt: daysAgo(30),
       }),
     );
-  } else {
-    console.warn('Nenhum plano encontrado — assinatura não criada.');
+
+    for (const [i, f] of extra.freights.entries()) {
+      await freightRepoEarly.save(
+        freightRepoEarly.create({
+          id: `demo-freight-${f.key}`,
+          shippingLocation: FreightLocal.NATIONAL,
+          originCity: extra.city.city,
+          originState: extra.city.state,
+          originLatitude: String(extra.city.lat),
+          originLongitude: String(extra.city.lng),
+          destinyCity: f.destiny.city,
+          destinyState: f.destiny.state,
+          destinyLatitude: String(f.destiny.lat),
+          destinyLongitude: String(f.destiny.lng),
+          dateOrigin: daysAhead(i + 1),
+          dateReceiver: daysAhead(i + 3),
+          typeOfLoad: TypeOfLoad.COMPLETE,
+          product: f.product,
+          specieOfLoad: f.specie,
+          weightOfLoad: String(f.weightKg),
+          unityMetric: UnityMetric.BYWEIGHT,
+          vehicleTypes: f.vehicleTypes,
+          bodyTypes: f.bodyTypes,
+          Valuefreight: f.value,
+          valueAdvance: Math.round(f.value * 0.3),
+          calValue: PaymentMethod.VALORCONFIRMED,
+          Toll: Toll.INCLUEDVALUE,
+          methodPayment: 'Pix na entrega',
+          observation: 'Carga de demonstração gerada pelo seed.',
+          isActive: true,
+          openSolicitations: true,
+          companyId: extraCompany.id,
+          tags: ['demo'],
+          distance: '600 km',
+          lona: true,
+          tracker: true,
+          security: true,
+          isPublic: true,
+          isFeatured: f.isFeatured ?? false,
+          isToShare: true,
+          expiresAt: daysAhead(i + 5),
+        }),
+      );
+    }
   }
 
   // ── Vendedores (contatos administrativos que publicam fretes) ────────────
@@ -485,6 +582,104 @@ async function main(): Promise<void> {
         userId: driver.id,
         isMainVehicle: true,
         capacity: seed.vehicle.capacity,
+        antt: `RNTRC ${seed.cnh.slice(0, 8)}`,
+      }),
+    );
+  }
+
+  // ── Motoristas LOGÁVEIS no app (CPF em dígitos, perfil completo) ─────────
+  // O login do backend motorista (POST /auth/loginV2) busca o CPF por
+  // igualdade exata; o app envia só dígitos — por isso o CPF vai sem máscara.
+  interface LoginDriverSeed {
+    key: string;
+    name: string;
+    cpf: string; // apenas dígitos, com checksum válido
+    email: string;
+    phone: string;
+    home: CityPoint;
+    cnh: string;
+    plate: string;
+    vehicleType: VehicleType;
+    bodyType: BodyType;
+    capacity: number;
+  }
+
+  const loginDriverSeeds: LoginDriverSeed[] = [
+    {
+      key: 'motorista-demo',
+      name: 'Carlos Motorista Demo',
+      cpf: '52998224725',
+      email: 'motorista.demo@nfretes.com.br',
+      phone: '+5534988887777',
+      home: CITIES.uberlandia,
+      cnh: '98765432100',
+      plate: 'RTA5B67',
+      vehicleType: VehicleType.CART,
+      bodyType: BodyType.BULK_CARRIER,
+      capacity: 32000,
+    },
+    {
+      key: 'motorista-demo-2',
+      name: 'João Estrada Demo',
+      cpf: '11144477735',
+      email: 'motorista2.demo@nfretes.com.br',
+      phone: '+5511977776666',
+      home: CITIES.saopaulo,
+      cnh: '12312312300',
+      plate: 'SPX9C21',
+      vehicleType: VehicleType.TRUCK,
+      bodyType: BodyType.CHEST,
+      capacity: 14000,
+    },
+  ];
+
+  for (const seed of loginDriverSeeds) {
+    const driver = await driverRepo.save(
+      driverRepo.create({
+        id: `demo-driver-${seed.key}`,
+        name: seed.name,
+        email: seed.email,
+        phoneNumber: seed.phone,
+        password: await bcrypt.hash(COMPANY_PASSWORD, 10),
+        cpf: seed.cpf,
+        zipcode: '38400-100',
+        street: 'Rua dos Caminhoneiros',
+        number: '250',
+        city: seed.home.city,
+        state: seed.home.state,
+        district: 'Centro',
+        country: 'Brasil',
+        cnh: seed.cnh,
+        antt: `RNTRC ${seed.cnh.slice(0, 8)}`,
+        photoFaceURL: 'https://i.pravatar.cc/300?img=12',
+        documentPhotoURL: 'https://i.pravatar.cc/300?img=33',
+        similiary: 97.2,
+        isSucess: true,
+        isOnRoute: false,
+        device: 'seed',
+        lastAccess: hoursAgo(2),
+      }),
+    );
+    drivers.set(seed.key, driver);
+
+    await vehicleRepo.save(
+      vehicleRepo.create({
+        id: `demo-vehicle-${seed.key}`,
+        vehicleType: seed.vehicleType,
+        bodyType: seed.bodyType,
+        plateNumber: seed.plate,
+        plateState: seed.home.state,
+        renavam: `00${seed.cnh}`,
+        chassi: `9BW${seed.cnh}ZZ`,
+        year: 2022,
+        color: 'Prata',
+        isPlateValid: true,
+        isRenavamValid: true,
+        tracker: true,
+        locator: true,
+        userId: driver.id,
+        isMainVehicle: true,
+        capacity: seed.capacity,
         antt: `RNTRC ${seed.cnh.slice(0, 8)}`,
       }),
     );
@@ -1473,12 +1668,18 @@ async function main(): Promise<void> {
   console.log('');
   console.log('Seed concluído com sucesso!');
   console.log('──────────────────────────────────────────');
-  console.log('Login da transportadora demo:');
-  console.log(`  CNPJ:  ${COMPANY_CNPJ}`);
-  console.log('  Senha: definida pela variável DEMO_COMPANY_PASSWORD');
+  console.log('Transportadoras (senha = DEMO_COMPANY_PASSWORD):');
+  console.log(`  ${COMPANY_CNPJ}  NFretes Demo (completa: rotas, avaliações, relatórios)`);
+  for (const extra of extraCompanySeeds) {
+    console.log(`  ${extra.cnpj}  ${extra.nameFantasy} (${extra.freights.length} fretes públicos)`);
+  }
+  console.log('Motoristas do app (senha = DEMO_COMPANY_PASSWORD):');
+  for (const d of loginDriverSeeds) {
+    console.log(`  CPF ${d.cpf}  ${d.name}`);
+  }
   console.log('──────────────────────────────────────────');
   console.log(
-    `Criados: ${driverSeeds.length} motoristas, ${freightSeeds.length} fretes, ${requestSeeds.length} solicitações, ${routeSeeds.length} rotas (3 em andamento com GPS), ${reviewSeeds.length} avaliações, ${notificationSeeds.length} notificações.`,
+    `Criados: ${driverSeeds.length + loginDriverSeeds.length} motoristas, ${freightSeeds.length + 6} fretes, ${requestSeeds.length} solicitações, ${routeSeeds.length} rotas (3 em andamento com GPS), ${reviewSeeds.length} avaliações, ${notificationSeeds.length} notificações.`,
   );
 
   await connectionSource.destroy();

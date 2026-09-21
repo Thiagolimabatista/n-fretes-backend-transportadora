@@ -11,7 +11,11 @@ import {
 import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/Login.dto';
-import { AuthResponseDto, AuthResponseRegisterDto } from './dto/Auth.dto';
+import {
+  AuthResponseDto,
+  AuthResponseRegisterDto,
+  CheckCnpjResponseDto,
+} from './dto/Auth.dto';
 import {
   AuthcodeEmail,
   NotFoundUser,
@@ -67,20 +71,11 @@ export class AuthController {
   /********************************************************************************** */
 
   @Get('check-cnpj/:cnpj')
-  @ApiOperation({ summary: 'Verificar se já existe cadastro para o CNPJ' })
-  async checkCnpj(@Param('cnpj') cnpj: string) {
-    const digits = (cnpj ?? '').replace(/\D/g, '');
-    const formatted =
-      digits.length === 14
-        ? digits.replace(
-            /^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/,
-            '$1.$2.$3/$4-$5',
-          )
-        : cnpj;
-    const exists = !!(await this.companyRepository.findOne({
-      where: [{ cnpj: formatted }, { cnpj: digits }],
-    }));
-    return { exists };
+  @ApiOperation({
+    summary: 'Validar CNPJ para cadastro (dígitos, cadastro existente e Receita Federal)',
+  })
+  async checkCnpj(@Param('cnpj') cnpj: string): Promise<CheckCnpjResponseDto> {
+    return this.authService.checkCnpj(cnpj);
   }
 
   @Get('check-email/:email')
@@ -221,11 +216,6 @@ export class AuthController {
     @Body() resetPasswordDto: ResetPasswordByRecoveryCodeDto,
   ) {
     return this.authService.changePasswordByRecoveryCode(resetPasswordDto);
-  }
-
-  @Get('beneficits')
-  async getBeneficitsUser(@GetUserId() userId: string) {
-    return this.authService.getBeneficitsUser(userId);
   }
 
   @UseGuards(JwtAuthGuard)

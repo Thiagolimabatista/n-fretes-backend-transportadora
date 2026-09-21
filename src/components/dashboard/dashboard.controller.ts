@@ -34,12 +34,6 @@ export class DashboardController {
   }
 
   @UseGuards(JwtAuthGuard)
-  @Get('top-drivers')
-  async getTopDrivers(@GetUserId() userId: string) {
-    return this.dashboardService.getTopDrivers(userId);
-  }
-
-    @UseGuards(JwtAuthGuard)
   @Get('metrics-dashboard')
   async getMetricsDashboard(@GetUserId() userId: string) {
     return this.dashboardService.getMetricsDashboard(userId);
@@ -96,11 +90,5 @@ export class DashboardController {
       page ? Number(page) : 1,
       limit ? Number(limit) : 20,
     );
-  }
-
-  @UseGuards(JwtAuthGuard)
-  @Get('regional-coverage')
-  async getRegionalCoverage(@GetUserId() userId: string) {
-    return this.dashboardService.getRegionalCoverage(userId);
   }
 }

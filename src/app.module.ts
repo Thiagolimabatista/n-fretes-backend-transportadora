@@ -7,7 +7,6 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import configuration from './config/configuration';
 import { AuthModule } from '@components/auth/auth.module';
-import { SubscriptionModule } from '@components/subscriptions-company/subscription-company.module';
 import { ContactCompanyModule } from '@components/contact-company/contact-company.module';
 import { ContactGroupModule } from '@components/contact-group/contact-group.module';
 import { UsersContactCompanyModule } from '@components/users-contact-company/users-contact.module';
@@ -15,21 +14,15 @@ import { FreightModule } from '@components/freight/freight.module';
 import { CompanyModule } from '@components/company/company.module';
 import { FreightRequestModule } from './components/freight-request/freight-request.module';
 import { FreightRouteModule } from '@components/freight-route/freight-route.module';
-import { ReviewUserDriveModule } from '@components/review-users-drive/review-users-drive.module';
-import { AsaasModule } from '@components/asaas/assas.module';
-import { TransactionsModule } from '@components/transactions/transactions.module';
 //Croon
 import { FreightRequestCronModule } from '@components/cron/freight-requests/freight-request-croon-module';
 import { SqsModule } from '@components/sqs/sqs.module';
 import { DashboardModule } from '@components/dashboard/dashboard.module';
-import { WebhookAsaasModule } from '@components/webhooks/assas/webhook.assas.module';
-import { PlansCompanyModule } from '@components/plans-company/plans.company.module';
 import { NotificationModule } from '@components/notifications/notifications.module';
 import { AnalysisModule } from '@components/analysis/analysis.module';
 import { FeedbackModule } from '@components/feedback/feedback.module';
 import { FormsModule } from '@components/forms/forms.module';
 import { CompanySearchModule } from './components/company-search/company-search.module';
-import { Exclude } from 'class-transformer';
 import { ExcludeModule } from '@components/exclude/exclude.module';
 import { FreightRouteLocationsModule } from './components/freight-route-locations/freight-route-locations.module';
 import { DistanceModule } from '@components/distance/distance.module';
@@ -43,7 +36,6 @@ import { FretebrasModule } from '@components/fretebras/fretebras.module';
 import { UIFeaturesModule } from '@components/ui-features/ui-features.module';
 import { SdrModule } from '@components/sdr/srd.module';
 import { RouteCacheModule } from '@components/route-cache/route-cache.module';
-import { CompanyOverviewModule } from '@components/company-overview/company-overview.module';
 import { GeocodingModule } from '@components/geocoding/geocoding.module';
 
 @Module({
@@ -65,7 +57,6 @@ import { GeocodingModule } from '@components/geocoding/geocoding.module';
     }),
     ScheduleModule.forRoot(),
     AuthModule,
-    SubscriptionModule,
     ContactCompanyModule,
     ContactGroupModule,
     UsersContactCompanyModule,
@@ -73,14 +64,9 @@ import { GeocodingModule } from '@components/geocoding/geocoding.module';
     CompanyModule,
     FreightRequestModule,
     FreightRouteModule,
-    ReviewUserDriveModule,
     FreightRequestCronModule,
     SqsModule,
     DashboardModule,
-    AsaasModule,
-    WebhookAsaasModule,
-    PlansCompanyModule,
-    TransactionsModule,
     NotificationModule,
     AnalysisModule,
     FeedbackModule,
@@ -99,7 +85,6 @@ import { GeocodingModule } from '@components/geocoding/geocoding.module';
     UIFeaturesModule,
     SdrModule,
     RouteCacheModule,
-    CompanyOverviewModule,
     GeocodingModule,
   ],
   controllers: [AppController],

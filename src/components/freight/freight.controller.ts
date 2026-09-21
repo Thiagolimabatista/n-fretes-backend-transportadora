@@ -24,7 +24,6 @@ import { ParamsFreight } from './interface/IFreight';
 import { GetUserId } from 'src/decorators/get-user-decorator';
 import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
 import { Freight } from '@entities/freight.entity';
-import { FreightIsFeatured, SharingFreightDto } from './dto/sharing.dto';
 
 @ApiTags('freight')
 @Controller('freight')
@@ -143,8 +142,11 @@ export class FreightController {
   })
   @UseGuards(JwtAuthGuard)
   @Delete(':id/soft-delete')
-  async softDelete(@Param('id') id: string): Promise<string> {
-    return this.freightService.softDeleteFreight(id);
+  async softDelete(
+    @Param('id') id: string,
+    @GetUserId() userId: string,
+  ): Promise<string> {
+    return this.freightService.softDeleteFreight(id, userId);
   }
 
   /********************************************************************************** */
@@ -158,8 +160,11 @@ export class FreightController {
   })
   @UseGuards(JwtAuthGuard)
   @Patch(':id/active-freight')
-  async activeFreight(@Param('id') id: string): Promise<string> {
-    return this.freightService.activateFreight(id);
+  async activeFreight(
+    @Param('id') id: string,
+    @GetUserId() userId: string,
+  ): Promise<string> {
+    return this.freightService.activateFreight(id, userId);
   }
 
   /********************************************************************************** */
@@ -242,8 +247,9 @@ export class FreightController {
   async editFreight(
     @Param('id') id: string,
     @Body() updateFreight: UpdateFreightDto,
+    @GetUserId() userId: string,
   ): Promise<UpdateFreightDto> {
-    return this.freightService.editFreight(updateFreight, id);
+    return this.freightService.editFreight(updateFreight, id, userId);
   }
 
   /************************************* GET FREIGHT ID********************************************* */
@@ -274,26 +280,6 @@ export class FreightController {
   @Get(':userId/countFreight')
   async freightCountCompany(@Param('userId') userId: string) {
     return this.freightService.freightCountCompany(userId);
-  }
-
-  /************************************* SHARING********************************************* */
-
-  @UseGuards(JwtAuthGuard)
-  @Post('/sharing')
-  async sharingFreightUsers(
-    @Body() body: SharingFreightDto,
-    @GetUserId() userId: string,
-  ) {
-    return this.freightService.sharingFreightUsers(body, userId);
-  }
-
-  @UseGuards(JwtAuthGuard)
-  @Post('/sharing/isFeatured')
-  async freightIsFeatured(
-    @Body() body: FreightIsFeatured,
-    @GetUserId() userId: string,
-  ) {
-    return this.freightService.freightIsFeatured(body, userId);
   }
 
   @UseGuards(JwtAuthGuard)

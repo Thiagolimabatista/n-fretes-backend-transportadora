@@ -8,15 +8,76 @@ import { Company } from '@entities/company.entity';
 import { ParamsFreight } from './interface/IFreight';
 import { PaginationService } from '@components/pagination/pagination.service';
 import { UsersDrive } from '@entities/users-drive.entity';
-import { SubscriptionCompany } from '@entities/subscription-company.entity';
-import { FeatureUsage } from '@entities/feature-usage.entity';
-import { SQSService } from '@components/sqs/sqs.service';
-import { FeatureLog } from '@entities/feature-logs.entity';
-import { FreightIsFeatured, SharingFreightDto } from './dto/sharing.dto';
 import { DistanceService } from '@components/distance/distance.service';
 import { FreightDocument } from '@entities/freight-documents.entity';
 import { AwsService } from '@components/aws/aws.service';
 import { ConfigService } from '@nestjs/config';
+import { FreightLocal } from 'src/enum/freight';
+
+/**
+ * Regras fixas da plataforma: todo frete é nacional e público
+ * (não existe mais tipo de envio nem compartilhamento restrito).
+ */
+const FIXED_FREIGHT_RULES = {
+  shippingLocation: FreightLocal.NATIONAL,
+  isPublic: true,
+} as const;
+
+const FREIGHT_TIME_ZONE = 'America/Sao_Paulo';
+
+type FreightDates = {
+  dateOrigin?: Date | string | null;
+  dateReceiver?: Date | string | null;
+};
+
+/** Dia civil em Brasília ("2026-09-21"), para comparar datas sem hora. */
+function toDayKey(value: Date | string | null | undefined): string | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: FREIGHT_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
+/**
+ * Coleta e entrega não podem ser marcadas no passado, e a entrega não pode
+ * vir antes da coleta. Na edição, uma data antiga que não mudou é mantida.
+ */
+function assertFreightDates(next: FreightDates, current?: FreightDates) {
+  const today = toDayKey(new Date());
+  const pick = (field: keyof FreightDates) =>
+    next[field] !== undefined ? next[field] : current?.[field];
+  const changed = (field: keyof FreightDates) =>
+    next[field] !== undefined &&
+    toDayKey(next[field]) !== toDayKey(current?.[field]);
+
+  const origin = toDayKey(pick('dateOrigin'));
+  const receiver = toDayKey(pick('dateReceiver'));
+
+  if (changed('dateOrigin') && origin && origin < today) {
+    throw new HttpException(
+      'A data da coleta não pode estar no passado.',
+      HttpStatus.BAD_REQUEST,
+    );
+  }
+  if (changed('dateReceiver') && receiver && receiver < today) {
+    throw new HttpException(
+      'A data da entrega não pode estar no passado.',
+      HttpStatus.BAD_REQUEST,
+    );
+  }
+  if (origin && receiver && receiver < origin) {
+    throw new HttpException(
+      'A data da entrega não pode ser anterior à data da coleta.',
+      HttpStatus.BAD_REQUEST,
+    );
+  }
+}
+
 export class FreightService {
   constructor(
     @InjectRepository(Freight)
@@ -25,16 +86,9 @@ export class FreightService {
     private companyRepository: Repository<Company>,
     @InjectRepository(UsersDrive)
     private userDriveRepository: Repository<UsersDrive>,
-    @InjectRepository(SubscriptionCompany)
-    private subscriptionCompanyRepository: Repository<SubscriptionCompany>,
-    @InjectRepository(FeatureUsage)
-    private featureUsageRepository: Repository<FeatureUsage>,
-    @InjectRepository(FeatureLog)
-    private featureLogsRepository: Repository<FeatureLog>,
     @InjectRepository(FreightDocument)
     private freightDocumentRepository: Repository<FreightDocument>,
     private readonly paginationService: PaginationService,
-    private readonly sqsService: SQSService,
     private readonly distanceService: DistanceService,
     private readonly awsService: AwsService,
     private readonly configService: ConfigService,
@@ -55,23 +109,27 @@ export class FreightService {
     createFreightDto: CreateFreightDto,
     userId: string,
   ): Promise<CreateFreightDto> {
+    const { advance, valueAdvance, ...fields } = createFreightDto;
+    assertFreightDates(fields);
+
     try {
-      const data = {
-        ...createFreightDto,
+      const create = this.freightRepository.create({
+        ...fields,
+        ...FIXED_FREIGHT_RULES,
+        valueAdvance: valueAdvance ?? advance ?? 0,
+        contactCompanyId:
+          fields.contactCompanyId ?? fields.contactCompanyIds?.[0] ?? null,
         companyId: userId,
-        tags: this.normalizeTags(createFreightDto.tags ?? []),
-      };
+        tags: this.normalizeTags(fields.tags ?? []),
+      });
 
-      console.log(data, 'Retorno do data');
-
-   
-      const create = this.freightRepository.create(data);
-      const save = await this.freightRepository.save(create);
-
-      return save;
+      return await this.freightRepository.save(create);
     } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
       throw new HttpException(
-        error?.message || 'Erro ao criar o frete',
+        'Não foi possível salvar o frete. Revise os dados e tente novamente.',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
@@ -102,31 +160,38 @@ export class FreightService {
   async editFreight(
     update: UpdateFreightDto,
     id: string,
+    userId: string,
   ): Promise<UpdateFreightDto> {
     try {
-      const freight = await this.freightRepository.findOne({ where: { id } });
+      const freight = await this.freightRepository.findOne({
+        where: { id, companyId: userId },
+      });
 
       if (!freight) {
         throw new HttpException('Frete não encontrado', HttpStatus.NOT_FOUND);
       }
 
-      const payload = {
-        ...update,
-        tags:
-          update.tags !== undefined
-            ? this.normalizeTags(update.tags as string[])
-            : freight.tags,
-      };
+      const { advance, valueAdvance, ...fields } = update;
+      const nextAdvance = valueAdvance ?? advance;
+      assertFreightDates(fields, freight);
 
-      await this.freightRepository.update(freight.id, payload);
-      const updatedFreight = await this.freightRepository.findOne({
-        where: { id },
+      await this.freightRepository.update(freight.id, {
+        ...fields,
+        ...FIXED_FREIGHT_RULES,
+        ...(nextAdvance !== undefined ? { valueAdvance: nextAdvance } : {}),
+        tags:
+          fields.tags !== undefined
+            ? this.normalizeTags(fields.tags as string[])
+            : freight.tags,
       });
 
-      return updatedFreight;
+      return await this.freightRepository.findOne({ where: { id } });
     } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
       throw new HttpException(
-        error?.message || 'Erro ao atualizar o frete',
+        'Não foi possível atualizar o frete. Revise os dados e tente novamente.',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
@@ -750,124 +815,53 @@ export class FreightService {
   }
 
   /****************************************SOFT DELETE FREIGHT****************************************** */
-  async softDeleteFreight(id: string): Promise<string> {
-    const queryRunner =
-      this.freightRepository.manager.connection.createQueryRunner();
-    await queryRunner.startTransaction();
-
-    try {
-      const freight = await queryRunner.manager.findOne(Freight, {
-        where: { id },
-      });
-
-      if (!freight) {
-        throw new HttpException(
-          'Não foi localizado um frete para essa empresa',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-      await queryRunner.manager.update(
-        Freight,
-        { id },
-        { isActive: false, openSolicitations: false },
-      );
-      await queryRunner.commitTransaction();
-
-      return 'frete desativado com sucesso';
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      throw new HttpException(
-        error?.message || 'Erro ao desativar frete da empresa',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    } finally {
-      await queryRunner.release();
-    }
+  /** Desativa o frete (sai das buscas dos motoristas, continua em "Inativo"). */
+  async softDeleteFreight(id: string, companyId: string): Promise<string> {
+    await this.findOwnedFreight(id, companyId);
+    await this.freightRepository.update(
+      { id, companyId },
+      { isActive: false, openSolicitations: false },
+    );
+    return 'Frete desativado com sucesso';
   }
 
   /****************************************EXCLUDE FREIGHT****************************************** */
+  /** Exclui o frete: some de todas as listas da empresa e dos motoristas. */
   async excludeFreight(id: string, userId: string): Promise<string> {
-    const queryRunner =
-      this.freightRepository.manager.connection.createQueryRunner();
-    await queryRunner.startTransaction();
-
-    try {
-      const freight = await queryRunner.manager.findOne(Freight, {
-        where: { id },
-      });
-
-      if (!freight) {
-        throw new HttpException(
-          'Não foi localizado um frete para exclusão',
-          HttpStatus.NOT_FOUND,
-        );
-      }
-
-      if (freight.isExclude) {
-        throw new HttpException(
-          'Este frete já foi excluído',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-
-      await queryRunner.manager.update(
-        Freight,
-        { id },
-        {
-          isExclude: true,
-          isExcludeUserId: userId,
-          isActive: false,
-          openSolicitations: false,
-        },
-      );
-
-      await queryRunner.commitTransaction();
-
-      return 'Frete excluído com sucesso';
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      throw new HttpException(
-        error?.message || 'Erro ao excluir frete',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    } finally {
-      await queryRunner.release();
-    }
+    await this.findOwnedFreight(id, userId);
+    await this.freightRepository.update(
+      { id, companyId: userId },
+      {
+        isExclude: true,
+        isExcludeUserId: userId,
+        isActive: false,
+        openSolicitations: false,
+      },
+    );
+    return 'Frete excluído com sucesso';
   }
 
-  async activateFreight(id: string): Promise<string> {
-    const queryRunner =
-      this.freightRepository.manager.connection.createQueryRunner();
-    await queryRunner.startTransaction();
-
-    try {
-      const freight = await queryRunner.manager.findOne(Freight, {
-        where: { id },
-      });
-
-      if (!freight) {
-        throw new HttpException(
-          'Não foi localizado um frete para essa empresa',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-      await queryRunner.manager.update(
-        Freight,
-        { id },
-        { isActive: true, openSolicitations: true },
-      );
-      await queryRunner.commitTransaction();
-
-      return 'frete desativado com sucesso';
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      throw new HttpException(
-        error?.message || 'Erro ao desativar frete da empresa',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    } finally {
-      await queryRunner.release();
+  /** Frete da empresa logada que ainda não foi excluído (404 caso contrário). */
+  private async findOwnedFreight(
+    id: string,
+    companyId: string,
+  ): Promise<Freight> {
+    const freight = await this.freightRepository.findOne({
+      where: { id, companyId, isExclude: false },
+    });
+    if (!freight) {
+      throw new HttpException('Frete não encontrado', HttpStatus.NOT_FOUND);
     }
+    return freight;
+  }
+
+  async activateFreight(id: string, companyId: string): Promise<string> {
+    await this.findOwnedFreight(id, companyId);
+    await this.freightRepository.update(
+      { id, companyId },
+      { isActive: true, openSolicitations: true },
+    );
+    return 'Frete ativado com sucesso';
   }
 
   /****************************************FILTERS REGIONS****************************************** */
@@ -1277,175 +1271,6 @@ export class FreightService {
         error?.message || 'Erro ao remover tag do frete',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
-    }
-  }
-
-  /****************************************FREIGHT SHARING****************************************** */
-
-  async sharingFreightUsers(body: SharingFreightDto, userId: string) {
-    const { usersIds, freightId } = body;
-
-    try {
-      const subscription = await this.subscriptionCompanyRepository.findOne({
-        where: { companyId: userId },
-      });
-
-      if (!subscription) {
-        throw new HttpException(
-          'Não encontramos uma assinatura ativa para esta empresa.',
-          HttpStatus.NOT_FOUND,
-        );
-      }
-
-      const featureUsageUser = await this.featureUsageRepository.find({
-        where: { subscriptionId: subscription.id },
-        relations: ['feature'],
-      });
-
-      const pushNotification = featureUsageUser.find(
-        (usage) => usage.feature.name === 'push_notifications',
-      );
-
-      if (!pushNotification) {
-        throw new HttpException(
-          'O plano atual não inclui notificações push.',
-          HttpStatus.FORBIDDEN,
-        );
-      }
-
-      const usersCount = usersIds.length;
-      if (usersCount > pushNotification.quantityUsed) {
-        throw new HttpException(
-          `Limite de notificações excedido. Disponível: ${pushNotification.quantityUsed - pushNotification.quantityUsed}, Necessário: ${usersCount}`,
-          HttpStatus.TOO_MANY_REQUESTS,
-        );
-      }
-
-      const users = await this.userDriveRepository.find({
-        where: { id: In(usersIds) },
-        select: ['pushToken'],
-      });
-
-      const pushTokens = users
-        .map((user) => user.pushToken)
-        .filter((token) => token !== null && token !== undefined);
-
-      await this.sqsService.notifyFreightSharing(freightId, pushTokens);
-
-      pushNotification.quantityUsed -= usersCount;
-      await this.featureUsageRepository.save(pushNotification);
-
-      const featureLog = this.featureLogsRepository.create({
-        subscriptionId: subscription.id,
-        featureId: pushNotification.feature.id,
-        quantityChange: -usersCount,
-        metadata: {
-          freightId,
-          usersIds,
-          pushTokens,
-        },
-        relatedEntityId: freightId,
-        description: `Uso de ${usersCount} notificações push para o frete ${freightId}`,
-        performedById: userId,
-        performedByType: 'USER',
-      });
-
-      await this.featureLogsRepository.save(featureLog);
-
-      return {
-        success: true,
-        message: `Notificações enviadas para ${usersCount} usuários.`,
-        remaining: pushNotification.quantityUsed,
-      };
-    } catch (error) {
-      console.error('Erro ao compartilhar frete:', error);
-      if (error instanceof HttpException) {
-        throw error;
-      }
-      throw new HttpException(
-        'Erro interno ao processar notificações.',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-  }
-
-  async freightIsFeatured(body: FreightIsFeatured, userId: string) {
-    const { freightId } = body;
-
-    const queryRunner =
-      this.freightRepository.manager.connection.createQueryRunner();
-    await queryRunner.startTransaction();
-
-    try {
-      const subscription = await this.subscriptionCompanyRepository.findOne({
-        where: { companyId: userId },
-      });
-
-      if (!subscription) {
-        throw new HttpException(
-          'Não encontramos uma assinatura ativa para esta empresa.',
-          HttpStatus.NOT_FOUND,
-        );
-      }
-
-      const featureUsageUser = await this.featureUsageRepository.find({
-        where: { subscriptionId: subscription.id },
-        relations: ['feature'],
-      });
-
-      const freteDestaque = featureUsageUser.find(
-        (usage) => usage.feature.name === 'fretes_destaque',
-      );
-
-      if (!freteDestaque || freteDestaque.quantityUsed < 1) {
-        throw new HttpException(
-          'O plano atual não inclui fretes em destaque ou não há saldo disponível.',
-          HttpStatus.FORBIDDEN,
-        );
-      }
-
-      const now = new Date();
-      const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-      await queryRunner.manager.update(
-        Freight,
-        { id: freightId },
-        { isFeatured: true, expiresAt },
-      );
-
-      freteDestaque.quantityUsed -= 1;
-      await queryRunner.manager.save(freteDestaque);
-
-      const featureLog = this.featureLogsRepository.create({
-        subscriptionId: subscription.id,
-        featureId: freteDestaque.feature.id,
-        quantityChange: -1,
-        metadata: { freightId },
-        relatedEntityId: freightId,
-        description: `Uso de 1 frete destaque para o frete ${freightId}`,
-        performedById: userId,
-        performedByType: 'USER',
-      });
-      await queryRunner.manager.save(featureLog);
-
-      await queryRunner.commitTransaction();
-
-      return {
-        success: true,
-        message: `Frete marcado como destaque com sucesso.`,
-        remaining: freteDestaque.quantityUsed,
-      };
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      console.error('Erro ao destacar frete:', error);
-      if (error instanceof HttpException) {
-        throw error;
-      }
-      throw new HttpException(
-        'Erro interno ao destacar frete.',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    } finally {
-      await queryRunner.release();
     }
   }
 }
