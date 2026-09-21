@@ -57,7 +57,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Roda "yarn migration:run" como task one-off no ECS, com a MESMA imagem
+      # Roda "yarn migration:run-prod" (migrations compiladas em dist/) como task one-off no ECS, com a MESMA imagem
       # e as MESMAS envs/segredos do serviço — o banco não fica exposto à
       # internet para o CI. O TypeORM só aplica migrations pendentes
       # (idempotente); qualquer falha aborta o deploy.
@@ -72,7 +72,7 @@ jobs:
             --launch-type FARGATE \
             --task-definition "$TASK_FAMILY" \
             --network-configuration "$NETWORK" \
-            --overrides "{\"containerOverrides\":[{\"name\":\"$CONTAINER_NAME\",\"command\":[\"yarn\",\"migration:run\"]}]}" \
+            --overrides "{\"containerOverrides\":[{\"name\":\"$CONTAINER_NAME\",\"command\":[\"yarn\",\"migration:run-prod\"]}]}" \
             --started-by "github-actions-migrations" \
             --query 'tasks[0].taskArn' --output text)
 

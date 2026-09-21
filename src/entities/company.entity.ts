@@ -37,6 +37,10 @@ export class Company {
   @Column({ type: 'json', nullable: true })
   phoneNumberJson?: { number?: string; contact?: string };
 
+  /** Preferências de interface do portal (ver módulo preferences). */
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb", select: false })
+  preferences?: Record<string, unknown>;
+
   @Column({ nullable: true })
   phoneContact: string;
 

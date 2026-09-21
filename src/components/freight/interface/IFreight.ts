@@ -2,6 +2,8 @@ import { SpecieOfLoad, TypeOfLoad } from 'src/enum/freight';
 import { BodyType, VehicleType } from 'src/enum/vehicle';
 
 export interface ParamsFreight {
+  /** Texto livre: produto, cidades e nome da transportadora. */
+  search?: string;
   originCity?: string;
   originState?: string;
   take?: number;

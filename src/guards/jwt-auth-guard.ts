@@ -14,6 +14,8 @@ interface JwtPayload {
   username: string;
   sub: string;
   role: string;
+  /** Presente quando quem entrou foi um membro da equipe. */
+  contactId?: string;
 }
 
 @Injectable()

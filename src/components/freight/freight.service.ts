@@ -1,8 +1,14 @@
 import { Freight } from '@entities/freight.entity';
+import {
+  applyFreightSearchFilters,
+  applySearchableBase,
+  countListOptions,
+  type SearchFacet,
+} from './freight-search.filters';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { CreateFreightDto, UpdateFreightDto } from './dto/freight.dto';
-import { HttpException, HttpStatus } from '@nestjs/common';
+import { HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { ResponseFreightDto } from './dto/response-freight.dto';
 import { Company } from '@entities/company.entity';
 import { ParamsFreight } from './interface/IFreight';
@@ -79,6 +85,8 @@ function assertFreightDates(next: FreightDates, current?: FreightDates) {
 }
 
 export class FreightService {
+  private readonly logger = new Logger(FreightService.name);
+
   constructor(
     @InjectRepository(Freight)
     private freightRepository: Repository<Freight>,
@@ -336,96 +344,11 @@ export class FreightService {
         queryBuilder.andWhere('freight.id = :id', { id: params.id });
       }
 
-      if (params.originCity) {
-        const originCities = this.ensureArray(params.originCity);
-        if (originCities.length > 1) {
-          const originConditions = originCities.map(
-            (_, index) =>
-              `unaccent(LOWER(freight.originCity)) ILIKE unaccent(LOWER(:originCity${index}))`,
-          );
-          queryBuilder.andWhere(
-            `(${originConditions.join(' OR ')})`,
-            Object.fromEntries(
-              originCities.map((city, i) => [`originCity${i}`, `%${city}%`]),
-            ),
-          );
-        } else {
-          queryBuilder.andWhere(
-            `unaccent(LOWER(freight.originCity)) ILIKE unaccent(LOWER(:originCity))`,
-            { originCity: `%${originCities[0]}%` },
-          );
-        }
-      }
-
-      if (params.destinyCity) {
-        const destinyCities = this.ensureArray(params.destinyCity);
-        if (destinyCities.length > 1) {
-          const destinyConditions = destinyCities.map(
-            (_, index) =>
-              `unaccent(LOWER(freight.destinyCity)) ILIKE unaccent(LOWER(:destinyCity${index}))`,
-          );
-          queryBuilder.andWhere(
-            `(${destinyConditions.join(' OR ')})`,
-            Object.fromEntries(
-              destinyCities.map((city, i) => [`destinyCity${i}`, `%${city}%`]),
-            ),
-          );
-        } else {
-          queryBuilder.andWhere(
-            `unaccent(LOWER(freight.destinyCity)) ILIKE unaccent(LOWER(:destinyCity))`,
-            { destinyCity: `%${destinyCities[0]}%` },
-          );
-        }
-      }
-
-      if (params.vehicleTypes) {
-        const vehicleTypesArray = this.ensureArray(params.vehicleTypes);
-        if (vehicleTypesArray.length > 1) {
-          const vehicleConditions = vehicleTypesArray.map(
-            (_, index) =>
-              `unaccent(LOWER(freight.vehicleTypes)) ILIKE unaccent(LOWER(:vehicleType${index}))`,
-          );
-          queryBuilder.andWhere(
-            `(${vehicleConditions.join(' OR ')})`,
-            Object.fromEntries(
-              vehicleTypesArray.map((v, i) => [`vehicleType${i}`, `%${v}%`]),
-            ),
-          );
-        } else {
-          const vehicleTypesFormatted = `%${vehicleTypesArray[0]}%`;
-          queryBuilder.andWhere(
-            `unaccent(LOWER(freight.vehicleTypes)) ILIKE unaccent(LOWER(:vehicleTypes))`,
-            { vehicleTypes: vehicleTypesFormatted },
-          );
-        }
-      }
-
-      if (params.bodyTypes) {
-        const bodyTypesArray = this.ensureArray(params.bodyTypes);
-        if (bodyTypesArray.length > 1) {
-          const bodyConditions = bodyTypesArray.map(
-            (_, index) =>
-              `unaccent(LOWER(freight.bodyTypes)) ILIKE unaccent(LOWER(:bodyType${index}))`,
-          );
-          queryBuilder.andWhere(
-            `(${bodyConditions.join(' OR ')})`,
-            Object.fromEntries(
-              bodyTypesArray.map((v, i) => [`bodyType${i}`, `%${v}%`]),
-            ),
-          );
-        } else {
-          const bodyTypesFormatted = `%${bodyTypesArray[0]}%`;
-          queryBuilder.andWhere(
-            `unaccent(LOWER(freight.bodyTypes)) ILIKE unaccent(LOWER(:bodyTypes))`,
-            { bodyTypes: bodyTypesFormatted },
-          );
-        }
-      }
+      applyFreightSearchFilters(queryBuilder, params);
 
       const likeFilters = {
         typeOfLoad: `freight.typeOfLoad = :typeOfLoad`,
         specieOfLoad: `freight.specieOfLoad = :specieOfLoad`,
-
         product: `unaccent(LOWER(freight.product)) ILIKE unaccent(LOWER(:product))`,
       };
 
@@ -489,6 +412,7 @@ export class FreightService {
         .addSelect([
           'company.id',
           'company.name',
+          'company.nameFantasy',
           'company.photoUrl',
           'company.phoneNumber',
           'company.createdAt',
@@ -677,8 +601,6 @@ export class FreightService {
       const likeFilters = {
         typeOfLoad: `freight.typeOfLoad = :typeOfLoad`,
         specieOfLoad: `freight.specieOfLoad = :specieOfLoad`,
-        vehicleTypes: `freight.vehicleTypes = :vehicleTypes`,
-        bodyTypes: `freight.bodyTypes = :bodyTypes`,
         product: `unaccent(LOWER(freight.product)) ILIKE unaccent(LOWER(:product))`,
       };
 
@@ -699,47 +621,7 @@ export class FreightService {
       // Excluir fretes marcados como excluídos
       queryBuilder.andWhere('freight.isExclude = false');
 
-      if (params.originCity) {
-        const originCities = this.ensureArray(params.originCity);
-        if (originCities.length > 1) {
-          const originConditions = originCities.map(
-            (_, index) =>
-              `unaccent(LOWER(freight.originCity)) ILIKE unaccent(LOWER(:originCity${index}))`,
-          );
-          queryBuilder.andWhere(
-            `(${originConditions.join(' OR ')})`,
-            Object.fromEntries(
-              originCities.map((city, i) => [`originCity${i}`, `%${city}%`]),
-            ),
-          );
-        } else {
-          queryBuilder.andWhere(
-            `unaccent(LOWER(freight.originCity)) ILIKE unaccent(LOWER(:originCity))`,
-            { originCity: `%${originCities[0]}%` },
-          );
-        }
-      }
-
-      if (params.destinyCity) {
-        const destinyCities = this.ensureArray(params.destinyCity);
-        if (destinyCities.length > 1) {
-          const destinyConditions = destinyCities.map(
-            (_, index) =>
-              `unaccent(LOWER(freight.destinyCity)) ILIKE unaccent(LOWER(:destinyCity${index}))`,
-          );
-          queryBuilder.andWhere(
-            `(${destinyConditions.join(' OR ')})`,
-            Object.fromEntries(
-              destinyCities.map((city, i) => [`destinyCity${i}`, `%${city}%`]),
-            ),
-          );
-        } else {
-          queryBuilder.andWhere(
-            `unaccent(LOWER(freight.destinyCity)) ILIKE unaccent(LOWER(:destinyCity))`,
-            { destinyCity: `%${destinyCities[0]}%` },
-          );
-        }
-      }
+      applyFreightSearchFilters(queryBuilder, params, { searchCompany: false });
 
       Object.entries(likeFilters).forEach(([key, condition]) => {
         if (
@@ -1000,6 +882,95 @@ export class FreightService {
       throw new HttpException(
         error?.message ||
           'Erro ao mapear regiões de todos os fretes da empresa',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * Opções dos filtros de busca com a quantidade de fretes de cada uma.
+   * Cada grupo é contado aplicando os OUTROS filtros ativos (busca por
+   * faceta): escolher a origem São Paulo mostra só os destinos que saem de
+   * São Paulo, e nenhuma opção leva a uma lista vazia.
+   * `scope=mine` conta só os fretes da própria empresa (Meus Fretes).
+   */
+  async getSearchOptions(
+    params: ParamsFreight & { scope?: string },
+    userId: string,
+  ): Promise<{
+    origins: Array<{ city: string; state: string; count: number }>;
+    destinies: Array<{ city: string; state: string; count: number }>;
+    vehicleTypes: Array<{ value: string; count: number }>;
+    bodyTypes: Array<{ value: string; count: number }>;
+  }> {
+    const mine = params.scope === 'mine';
+
+    const baseQuery = (except: SearchFacet) => {
+      const qb = this.freightRepository.createQueryBuilder('freight');
+      if (mine) {
+        qb.where('freight."companyId" = :companyId', { companyId: userId })
+          .andWhere('freight."isExclude" = false');
+        const isActive = String(params.isActive ?? '');
+        if (isActive === 'true' || isActive === 'false') {
+          qb.andWhere('freight."isActive" = :isActive', {
+            isActive: isActive === 'true',
+          });
+        }
+      } else {
+        applySearchableBase(qb);
+        if (params.search?.trim()) qb.leftJoin('freight.company', 'company');
+      }
+      applyFreightSearchFilters(qb, params, {
+        except,
+        searchCompany: !mine,
+      });
+      return qb;
+    };
+
+    const places = async (kind: 'origin' | 'destiny') => {
+      const rows = await baseQuery(kind)
+        .select(`min(freight."${kind}CityName")`, 'city')
+        .addSelect(`freight."${kind}State"`, 'state')
+        .addSelect('COUNT(*)', 'count')
+        .andWhere(`freight."${kind}CityName" IS NOT NULL`)
+        .andWhere(`freight."${kind}State" IS NOT NULL`)
+        .groupBy(`freight."${kind}State"`)
+        .addGroupBy(`lower(freight."${kind}CityName")`)
+        .getRawMany<{ city: string; state: string; count: string }>();
+      return rows
+        .map((row) => ({
+          city: row.city,
+          state: row.state.toUpperCase(),
+          count: Number(row.count),
+        }))
+        .sort(
+          (a, b) =>
+            b.count - a.count || a.city.localeCompare(b.city, 'pt-BR'),
+        );
+    };
+
+    const lists = async (kind: 'vehicle' | 'body') => {
+      const column = kind === 'vehicle' ? 'vehicleTypes' : 'bodyTypes';
+      const rows = await baseQuery(kind)
+        .select(`freight."${column}"`, 'list')
+        .addSelect('COUNT(*)', 'count')
+        .groupBy(`freight."${column}"`)
+        .getRawMany<{ list: string | null; count: string }>();
+      return countListOptions(rows, kind);
+    };
+
+    try {
+      const [origins, destinies, vehicleTypes, bodyTypes] = await Promise.all([
+        places('origin'),
+        places('destiny'),
+        lists('vehicle'),
+        lists('body'),
+      ]);
+      return { origins, destinies, vehicleTypes, bodyTypes };
+    } catch (error) {
+      this.logger.error(`Falha ao montar opções de busca: ${error?.message}`);
+      throw new HttpException(
+        'Não foi possível carregar os filtros agora. Tente novamente.',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }

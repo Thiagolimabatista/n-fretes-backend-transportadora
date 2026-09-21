@@ -12,6 +12,7 @@ import { ContactGroupModule } from '@components/contact-group/contact-group.modu
 import { UsersContactCompanyModule } from '@components/users-contact-company/users-contact.module';
 import { FreightModule } from '@components/freight/freight.module';
 import { CompanyModule } from '@components/company/company.module';
+import { PreferencesModule } from '@components/preferences/preferences.module';
 import { FreightRequestModule } from './components/freight-request/freight-request.module';
 import { FreightRouteModule } from '@components/freight-route/freight-route.module';
 //Croon
@@ -62,6 +63,7 @@ import { GeocodingModule } from '@components/geocoding/geocoding.module';
     UsersContactCompanyModule,
     FreightModule,
     CompanyModule,
+    PreferencesModule,
     FreightRequestModule,
     FreightRouteModule,
     FreightRequestCronModule,

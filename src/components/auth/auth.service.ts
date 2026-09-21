@@ -671,7 +671,12 @@ export class AuthService {
       throw new HttpException('Dados inválidos', HttpStatus.BAD_REQUEST);
     }
 
-    const payload = { username: contact.company.cnpj, sub: contact.companyId };
+    // contactId identifica o membro da equipe (preferências próprias).
+    const payload = {
+      username: contact.company.cnpj,
+      sub: contact.companyId,
+      contactId: contact.id,
+    };
     const token = await this.generateJwt(payload);
     return { access_token: token, company: false };
   }

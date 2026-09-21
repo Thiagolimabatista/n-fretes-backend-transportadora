@@ -208,6 +208,19 @@ export class FreightController {
     description: 'TokenId',
     type: String,
   })
+  @Get('search-options')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary:
+      'Opções dos filtros de busca (origem, destino, veículo, carroceria) com a quantidade de fretes de cada uma',
+  })
+  async getSearchOptions(
+    @Query() params: ParamsFreight & { scope?: string },
+    @GetUserId() userId: string,
+  ) {
+    return this.freightService.getSearchOptions(params, userId);
+  }
+
   @Get('filtersCityOrDestiny')
   @UseGuards(JwtAuthGuard)
   async getFiltersDestinyOrCity(@GetUserId() userId: string) {

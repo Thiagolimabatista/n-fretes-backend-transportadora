@@ -35,6 +35,10 @@ export class ContactCompany {
   @Column({ default: true })
   isActive: boolean;
 
+  /** Preferências de interface do portal (ver módulo preferences). */
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb", select: false })
+  preferences?: Record<string, unknown>;
+
   @CreateDateColumn()
   createdAt: Date;
 
