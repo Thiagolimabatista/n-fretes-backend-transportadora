@@ -59,18 +59,14 @@ export class SQSConsumerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    this.logger.log('🚀 Iniciando SQS Consumer (Worker Mode)...');
-    this.logger.log('📡 Consumer ficará SEMPRE ativo escutando as filas');
-
-    if (this.queueUrlFreightSharing) {
-      const promise = this.startPollingWithRetry(
-        this.queueUrlFreightSharing,
-        'FREIGHT_SHARING_NOTIFICATIONS',
-      );
-      this.pollingPromises.push(promise);
-    }
-
-    this.startHeartbeat();
+    // A fila de notificações ao motorista (QUEUE_SHARING_NOTIFICATION_FREIGHT)
+    // é do n-fretes-workers, que envia o push. Consumir aqui só registrava no
+    // log e APAGAVA a mensagem, e o motorista deixava de receber o aviso de
+    // "frete aceito". Não há outra fila para este serviço consumir.
+    this.isPolling = false;
+    this.logger.log(
+      'SQS Consumer sem filas próprias: notificações ao motorista ficam com o n-fretes-workers.',
+    );
   }
 
   async onModuleDestroy() {
