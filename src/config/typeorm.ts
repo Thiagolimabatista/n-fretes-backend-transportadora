@@ -53,6 +53,9 @@ const config: ConfigObject = {
     : false,
   extra: {
     softDelete: true,
+    // Sessão em UTC: datas gravadas pelo Node e por DEFAULT now() ficam no
+    // mesmo fuso, seja qual for o fuso configurado no servidor Postgres.
+    options: '-c timezone=UTC',
   },
 };
 
