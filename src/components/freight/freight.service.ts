@@ -1,4 +1,5 @@
 import { Freight } from '@entities/freight.entity';
+import { occupyingRouteCondition } from '@components/freight-route/driver-on-route';
 import {
   applyFreightSearchFilters,
   applySearchableBase,
@@ -234,7 +235,15 @@ export class FreightService {
       `,
         'haversine_distance',
       )
-      .where('users_drive.isOnRoute = :isOnRoute', { isOnRoute: false })
+      // Fora de rota = sem rota que o ocupe de fato (`isOnRoute` fica desatualizado).
+      .where(
+        `NOT EXISTS (
+          SELECT 1
+            FROM freight_routes active_route
+           WHERE active_route."userDriveId" = users_drive.id
+             AND ${occupyingRouteCondition('active_route')}
+        )`,
+      )
       .andWhere(
         `
         6371 * acos(

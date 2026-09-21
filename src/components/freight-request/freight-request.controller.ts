@@ -13,7 +13,6 @@ import { CreateFreightRequestDto } from './dto/create-freight-request.dto';
 import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
 import { GetUserId } from 'src/decorators/get-user-decorator';
 import { ParamsFreightRequest } from './interface/IFreightRequest';
-import { FreightRequestStatus } from '@entities/freight-requests.entity';
 
 @UseGuards(JwtAuthGuard)
 @Controller('freight-request')
@@ -21,8 +20,14 @@ export class FreightRequestController {
   constructor(private readonly freightRequestService: FreightRequestService) {}
 
   @Post()
-  create(@Body() createFreightRequestDto: CreateFreightRequestDto) {
-    return this.freightRequestService.create(createFreightRequestDto);
+  create(
+    @GetUserId() companyId: string,
+    @Body() createFreightRequestDto: CreateFreightRequestDto,
+  ) {
+    return this.freightRequestService.create(
+      companyId,
+      createFreightRequestDto,
+    );
   }
 
   @Get()
@@ -30,31 +35,37 @@ export class FreightRequestController {
     return this.freightRequestService.findAll(userId, params);
   }
 
+  /** Aceite em 1 passo: cria a rota e avisa o motorista para iniciá-la. */
   @Patch(':id/accept')
-  async acceptFreightRequest(@Param('id') id: string) {
-    return this.freightRequestService.acceptFreightRequest(id);
-  }
-
-  @Patch(':id/accept-direct')
-  async acceptFreightRequestDirect(@Param('id') id: string) {
-    return this.freightRequestService.acceptFreightRequestDirect(id);
-  }
-
-  @Patch(':id/accept-user')
-  async acceptFreightRequestUserDrive(
+  async acceptFreightRequest(
+    @GetUserId() companyId: string,
     @Param('id') id: string,
-    @Body() status: FreightRequestStatus,
   ) {
-    return this.freightRequestService.acceptFreightRequestUserDrive(id, status);
+    return this.freightRequestService.acceptFreightRequest(companyId, id);
+  }
+
+  /** Mantido por compatibilidade: mesma lógica e resposta de `:id/accept`. */
+  @Patch(':id/accept-direct')
+  async acceptFreightRequestDirect(
+    @GetUserId() companyId: string,
+    @Param('id') id: string,
+  ) {
+    return this.freightRequestService.acceptFreightRequest(companyId, id);
   }
 
   @Patch(':id/confirmed')
-  async confirmedFreightRequest(@Param('id') id: string) {
-    return this.freightRequestService.confirmedFreightRequest(id);
+  async confirmedFreightRequest(
+    @GetUserId() companyId: string,
+    @Param('id') id: string,
+  ) {
+    return this.freightRequestService.confirmedFreightRequest(companyId, id);
   }
 
   @Patch(':id/reject')
-  async rejectFreightRequest(@Param('id') id: string) {
-    return this.freightRequestService.rejectFreightRequest(id);
+  async rejectFreightRequest(
+    @GetUserId() companyId: string,
+    @Param('id') id: string,
+  ) {
+    return this.freightRequestService.rejectFreightRequest(companyId, id);
   }
 }

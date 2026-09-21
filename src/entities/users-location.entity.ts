@@ -30,8 +30,9 @@ export class UsersLocation {
   @Column({ type: 'decimal', precision: 10, scale: 6 })
   longitude: number;
 
-  @Column({ type: 'varchar', length: 255 })
-  city: string;
+  /** Opcional: a geocodificação da posição pode falhar. */
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  city: string | null;
 
   @CreateDateColumn({ type: 'timestamp', default: () => 'CURRENT_TIMESTAMP' })
   createdAt: Date;

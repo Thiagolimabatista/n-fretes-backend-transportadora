@@ -11,6 +11,24 @@ import {
   FreightRequestStatus,
 } from '@entities/freight-requests.entity';
 import { Vehicle } from '@entities/vehicles.entity';
+import {
+  formatSaoPauloDate,
+  lastSaoPauloDays,
+  saoPauloDaySql,
+  startOfSaoPauloDay,
+} from '@components/utils/formatTime-SP';
+
+/**
+ * Solicitações em aberto da empresa: PENDING em fretes dela ainda não
+ * excluídos. O dono é o do frete (o `companyId` da solicitação vem do app).
+ * Mesma regra no card do painel, no resumo semanal e na lista de pendentes.
+ */
+const PENDING_SOLICITATIONS_FROM = `
+  FROM freight_requests freq
+  INNER JOIN freight f ON f.id = freq."freightId"
+  WHERE f."companyId" = $1
+    AND f."isExclude" = false
+    AND freq.status = 'PENDING'`;
 
 @Injectable()
 export class DashboardService {
@@ -238,18 +256,7 @@ export class DashboardService {
           },
         }),
 
-        this.freightRequestRepository
-          .createQueryBuilder('freightRequest')
-          .leftJoin('freightRequest.freight', 'freight')
-          .where('freightRequest.companyId = :userId', { userId })
-          .andWhere('freightRequest.status = :status', {
-            status: FreightRequestStatus.PENDING,
-          })
-          .andWhere('freight.isActive = :isActive', { isActive: true })
-          .andWhere('freight.openSolicitations = :openSolicitations', {
-            openSolicitations: true,
-          })
-          .getCount(),
+        this.countPendingSolicitations(userId),
 
         this.freightRoutesRepository
           .createQueryBuilder('route')
@@ -399,46 +406,37 @@ export class DashboardService {
   async getMetricsDashboard(userId: string) {
     try {
       const currentDate = new Date();
-      
-
-      const last7DaysStart = new Date(currentDate);
-      last7DaysStart.setDate(currentDate.getDate() - 7);
-      last7DaysStart.setHours(0, 0, 0, 0);
-      
-      const previous7DaysStart = new Date(currentDate);
-      previous7DaysStart.setDate(currentDate.getDate() - 14);
-      previous7DaysStart.setHours(0, 0, 0, 0);
-      
-      const previous7DaysEnd = new Date(last7DaysStart);
-      previous7DaysEnd.setHours(23, 59, 59, 999);
+      const days = lastSaoPauloDays(14, currentDate);
+      const previous7DaysStart = startOfSaoPauloDay(days[0]);
+      const last7DaysStart = startOfSaoPauloDay(days[7]);
+      const previous7DaysEnd = new Date(last7DaysStart.getTime() - 1);
 
       const [
-        totalFreights, 
-        last7DaysFreights, 
+        totalFreights,
+        last7DaysFreights,
         previous7DaysFreights,
         activeFreights,
         freightsInProgress,
-        pendingRequests
+        pendingRequests,
       ] = await Promise.all([
         this.freightRepository.count({
           where: { companyId: userId },
         }),
-        
+
         this.freightRepository.count({
           where: {
             companyId: userId,
             createdAt: Between(last7DaysStart, currentDate),
           },
         }),
-        
+
         this.freightRepository.count({
           where: {
             companyId: userId,
             createdAt: Between(previous7DaysStart, previous7DaysEnd),
           },
         }),
-        
-      
+
         this.freightRepository.count({
           where: {
             companyId: userId,
@@ -456,15 +454,9 @@ export class DashboardService {
         }),
 
         // Solicitações de frete pendentes
-        this.freightRequestRepository.count({
-          where: {
-            companyId: userId,
-            status: FreightRequestStatus.PENDING,
-          },
-        }),
+        this.countPendingSolicitations(userId),
       ]);
 
-   
       let percentageChange = 0;
       if (previous7DaysFreights > 0) {
         percentageChange = ((last7DaysFreights - previous7DaysFreights) / previous7DaysFreights) * 100;
@@ -496,11 +488,9 @@ export class DashboardService {
   async getWeeklySummary(companyId: string) {
     try {
       const now = new Date();
-      const end = new Date(now);
-      end.setUTCHours(23, 59, 59, 999);
-      const start = new Date(now);
-      start.setDate(start.getDate() - 6);
-      start.setUTCHours(0, 0, 0, 0);
+      const days = lastSaoPauloDays(7, now);
+      const start = startOfSaoPauloDay(days[0]);
+      const end = now;
 
       const [
         totalPublished,
@@ -510,7 +500,7 @@ export class DashboardService {
         totalDriversInRoute,
         leadTimeResult,
       ] = await Promise.all([
-        // Total de fretes publicados nos últimos 7 dias
+        // Total de fretes publicados nos últimos 7 dias (dias de São Paulo)
         this.freightRepository.count({
           where: {
             companyId,
@@ -537,14 +527,8 @@ export class DashboardService {
           },
         }),
 
-        // Solicitações em aberto (PENDING) nos últimos 7 dias
-        this.freightRequestRepository.count({
-          where: {
-            companyId,
-            status: FreightRequestStatus.PENDING,
-            createdAt: Between(start, end),
-          },
-        }),
+        // Solicitações em aberto: todas as PENDING da empresa (igual ao card)
+        this.countPendingSolicitations(companyId),
 
         // Motoristas distintos em rota agora
         this.freightRoutesRepository
@@ -555,42 +539,44 @@ export class DashboardService {
           .andWhere('fr.userDriveId IS NOT NULL')
           .getRawOne(),
 
-        // Lead time: tempo médio entre publicação do frete e 1ª solicitação recebida
+        // Lead time: publicação do frete -> 1ª solicitação recebida. Liga as
+        // solicitações só pelo frete (o companyId delas vem do app).
         this.freightRepository.manager.query(
           `
           SELECT
-            AVG(
-              EXTRACT(EPOCH FROM (first_req.first_request_at - f."createdAt")) / 60
-            ) AS avg_minutes,
-            MIN(
-              EXTRACT(EPOCH FROM (first_req.first_request_at - f."createdAt")) / 60
-            ) AS min_minutes,
-            MAX(
-              EXTRACT(EPOCH FROM (first_req.first_request_at - f."createdAt")) / 60
-            ) AS max_minutes
-          FROM freight f
-          INNER JOIN (
-            SELECT "freightId", MIN("createdAt") AS first_request_at
-            FROM freight_requests
-            WHERE "companyId" = $1
-            GROUP BY "freightId"
-          ) first_req ON first_req."freightId" = f.id
-          WHERE f."companyId" = $1
-            AND f."isExclude" = false
-            AND f."createdAt" BETWEEN $2 AND $3
+            COUNT(*)            AS sample_size,
+            AVG(lead_minutes)   AS avg_minutes,
+            MIN(lead_minutes)   AS min_minutes,
+            MAX(lead_minutes)   AS max_minutes
+          FROM (
+            SELECT
+              EXTRACT(EPOCH FROM (first_req.first_request_at - f."createdAt")) / 60 AS lead_minutes
+            FROM freight f
+            INNER JOIN (
+              SELECT "freightId", MIN("createdAt") AS first_request_at
+              FROM freight_requests
+              GROUP BY "freightId"
+            ) first_req ON first_req."freightId" = f.id
+            WHERE f."companyId" = $1
+              AND f."isExclude" = false
+              AND f."createdAt" BETWEEN $2 AND $3
+          ) samples
           `,
           [companyId, start, end],
         ),
       ]);
 
-      const avgMin = Number(Number(leadTimeResult[0]?.avg_minutes ?? 0).toFixed(2));
-      const minMin = Number(Number(leadTimeResult[0]?.min_minutes ?? 0).toFixed(2));
-      const maxMin = Number(Number(leadTimeResult[0]?.max_minutes ?? 0).toFixed(2));
+      const sampleSize = Number(leadTimeResult[0]?.sample_size ?? 0);
+      const minutesOrNull = (value: unknown): number | null =>
+        sampleSize > 0 && value !== null && value !== undefined
+          ? Number(Number(value).toFixed(2))
+          : null;
+      const avgMin = minutesOrNull(leadTimeResult[0]?.avg_minutes);
 
       return {
         period: {
-          startDate: start.toLocaleDateString('pt-BR', { timeZone: 'UTC' }),
-          endDate: end.toLocaleDateString('pt-BR', { timeZone: 'UTC' }),
+          startDate: formatSaoPauloDate(start),
+          endDate: formatSaoPauloDate(end),
           days: 7,
         },
         freights: {
@@ -599,7 +585,9 @@ export class DashboardService {
           currentlyInRoute: totalInRoute,
         },
         solicitations: {
+          /** Mantido o nome por compatibilidade: são todas as PENDING da empresa. */
           pendingLast7Days: totalPendingRequests,
+          pending: totalPendingRequests,
         },
         drivers: {
           currentlyInRoute: Number(totalDriversInRoute?.total ?? 0),
@@ -607,10 +595,12 @@ export class DashboardService {
         leadTime: {
           description: 'Tempo entre publicação do frete e 1ª solicitação recebida',
           avgMinutes: avgMin,
-          avgHours: Number((avgMin / 60).toFixed(2)),
-          minMinutes: minMin,
-          maxMinutes: maxMin,
+          avgHours: avgMin === null ? null : Number((avgMin / 60).toFixed(2)),
+          minMinutes: minutesOrNull(leadTimeResult[0]?.min_minutes),
+          maxMinutes: minutesOrNull(leadTimeResult[0]?.max_minutes),
+          sampleSize,
         },
+        leadTimeSampleSize: sampleSize,
       };
     } catch (error) {
       throw new HttpException(
@@ -679,7 +669,8 @@ export class DashboardService {
           FROM freight_requests freq
           INNER JOIN freight f ON f.id = freq."freightId"
           LEFT  JOIN users_drive ud ON ud.id = freq."userDriveId"
-          WHERE freq."companyId" = $1
+          WHERE f."companyId" = $1
+            AND f."isExclude" = false
             AND freq.status = 'PENDING'
             AND freq."createdAt" <= ($2 - INTERVAL '1 hour')
           ORDER BY freq."createdAt" ASC
@@ -746,85 +737,90 @@ export class DashboardService {
   async getFreightVolume(companyId: string, period: 7 | 30 | 90 = 7) {
     try {
       const now = new Date();
-      const end = new Date(now);
-      end.setUTCHours(23, 59, 59, 999);
-      const start = new Date(now);
-      start.setDate(start.getDate() - (period - 1));
-      start.setUTCHours(0, 0, 0, 0);
+      const dayKeys = lastSaoPauloDays(period, now);
+      const start = startOfSaoPauloDay(dayKeys[0]);
+      const end = now;
 
       const DAY_NAMES: Record<string, string> = {
         '0': 'Dom', '1': 'Seg', '2': 'Ter',
         '3': 'Qua', '4': 'Qui', '5': 'Sex', '6': 'Sáb',
       };
 
-      const [publicationsRows, deliveriesRows, driversRows] = await Promise.all([
-        // Publicações por dia
-        this.freightRepository.manager.query(
-          `
-          SELECT
-            TO_CHAR(f."createdAt", 'DD/MM')                         AS day_label,
-            TO_CHAR(f."createdAt", 'YYYY-MM-DD')                    AS day_key,
-            EXTRACT(DOW FROM f."createdAt")::text                   AS dow,
-            COUNT(f.id)                                              AS total
-          FROM freight f
-          WHERE f."companyId" = $1
-            AND f."isExclude" = false
-            AND f."createdAt" BETWEEN $2 AND $3
-          GROUP BY day_label, day_key, dow
-          ORDER BY day_key ASC
-          `,
-          [companyId, start, end],
-        ),
+      const [publicationsRows, deliveriesRows, driversRows, cohortRows] =
+        await Promise.all([
+          // Publicações por dia
+          this.freightRepository.manager.query(
+            `
+            SELECT
+              ${saoPauloDaySql('f."createdAt"')}                   AS day_key,
+              COUNT(f.id)                                          AS total
+            FROM freight f
+            WHERE f."companyId" = $1
+              AND f."isExclude" = false
+              AND f."createdAt" BETWEEN $2 AND $3
+            GROUP BY day_key
+            `,
+            [companyId, start, end],
+          ),
 
-        // Entregas concluídas por dia
-        this.freightRepository.manager.query(
-          `
-          SELECT
-            TO_CHAR(fr."completedAt", 'DD/MM')                      AS day_label,
-            TO_CHAR(fr."completedAt", 'YYYY-MM-DD')                 AS day_key,
-            COUNT(fr.id)                                             AS total
-          FROM freight_routes fr
-          WHERE fr."companyId" = $1
-            AND fr.status = 'COMPLETED'
-            AND fr."completedAt" BETWEEN $2 AND $3
-          GROUP BY day_label, day_key
-          ORDER BY day_key ASC
-          `,
-          [companyId, start, end],
-        ),
+          // Entregas concluídas por dia
+          this.freightRepository.manager.query(
+            `
+            SELECT
+              ${saoPauloDaySql('fr."completedAt"')}                AS day_key,
+              COUNT(fr.id)                                         AS total
+            FROM freight_routes fr
+            WHERE fr."companyId" = $1
+              AND fr.status = 'COMPLETED'
+              AND fr."completedAt" BETWEEN $2 AND $3
+            GROUP BY day_key
+            `,
+            [companyId, start, end],
+          ),
 
-        // Motoristas em rota por dia (contagem de rotas iniciadas naquele dia)
-        this.freightRepository.manager.query(
-          `
-          SELECT
-            TO_CHAR(fr."startedAt", 'DD/MM')                        AS day_label,
-            TO_CHAR(fr."startedAt", 'YYYY-MM-DD')                   AS day_key,
-            COUNT(DISTINCT fr."userDriveId")                         AS total
-          FROM freight_routes fr
-          WHERE fr."companyId" = $1
-            AND fr."userDriveId" IS NOT NULL
-            AND fr."startedAt" BETWEEN $2 AND $3
-          GROUP BY day_label, day_key
-          ORDER BY day_key ASC
-          `,
-          [companyId, start, end],
-        ),
-      ]);
+          // Motoristas em rota por dia (contagem de rotas iniciadas naquele dia)
+          this.freightRepository.manager.query(
+            `
+            SELECT
+              ${saoPauloDaySql('fr."startedAt"')}                  AS day_key,
+              COUNT(DISTINCT fr."userDriveId")                     AS total
+            FROM freight_routes fr
+            WHERE fr."companyId" = $1
+              AND fr."userDriveId" IS NOT NULL
+              AND fr."startedAt" BETWEEN $2 AND $3
+            GROUP BY day_key
+            `,
+            [companyId, start, end],
+          ),
 
-      // Gera todos os dias do período
-      const days: string[] = [];
-      const dayKeys: string[] = [];
-      const dayLabels: string[] = [];
-      const cursor = new Date(start);
-      while (cursor <= end) {
-        const key = cursor.toISOString().slice(0, 10);
-        const label = cursor.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', timeZone: 'UTC' });
-        const dow = String(cursor.getUTCDay());
-        days.push(period === 7 ? DAY_NAMES[dow] : label);
-        dayKeys.push(key);
-        dayLabels.push(label);
-        cursor.setDate(cursor.getDate() + 1);
-      }
+          // Conversão: dos fretes publicados no período, quantos já foram entregues
+          this.freightRepository.manager.query(
+            `
+            SELECT
+              COUNT(f.id) AS published,
+              COUNT(f.id) FILTER (
+                WHERE EXISTS (
+                  SELECT 1
+                  FROM freight_routes fr
+                  WHERE fr."freightId" = f.id
+                    AND fr.status = 'COMPLETED'
+                )
+              ) AS delivered
+            FROM freight f
+            WHERE f."companyId" = $1
+              AND f."isExclude" = false
+              AND f."createdAt" BETWEEN $2 AND $3
+            `,
+            [companyId, start, end],
+          ),
+        ]);
+
+      const days: string[] = dayKeys.map((key) => {
+        const [year, month, day] = key.split('-').map(Number);
+        const dow = String(new Date(Date.UTC(year, month - 1, day)).getUTCDay());
+        const label = `${key.slice(8, 10)}/${key.slice(5, 7)}`;
+        return period === 7 ? DAY_NAMES[dow] : label;
+      });
 
       const toMap = (rows: any[]) =>
         Object.fromEntries(rows.map((r) => [r.day_key, Number(r.total)]));
@@ -839,9 +835,13 @@ export class DashboardService {
 
       const totalPublications = publications.reduce((a, b) => a + b, 0);
       const totalDeliveries   = deliveries.reduce((a, b) => a + b, 0);
+      const cohortPublished = Number(cohortRows[0]?.published ?? 0);
+      const deliveredFromPublished = Number(cohortRows[0]?.delivered ?? 0);
       const conversionRate =
-        totalPublications > 0
-          ? Number(((totalDeliveries / totalPublications) * 100).toFixed(1))
+        cohortPublished > 0
+          ? Number(
+              ((deliveredFromPublished / cohortPublished) * 100).toFixed(1),
+            )
           : 0;
 
       // Pico: dia com mais publicações
@@ -851,8 +851,8 @@ export class DashboardService {
       return {
         period: {
           days: period,
-          startDate: start.toLocaleDateString('pt-BR', { timeZone: 'UTC' }),
-          endDate: end.toLocaleDateString('pt-BR', { timeZone: 'UTC' }),
+          startDate: formatSaoPauloDate(start),
+          endDate: formatSaoPauloDate(end),
         },
         chart: {
           labels: days,
@@ -865,7 +865,9 @@ export class DashboardService {
         summary: {
           totalPublications,
           totalDeliveries,
+          /** Entregues entre os publicados no período (nunca passa de 100%). */
           conversionRate,
+          deliveredFromPublished,
           peakDay,
         },
       };
@@ -1051,7 +1053,8 @@ export class DashboardService {
           LEFT  JOIN users_drive ud ON ud.id = freq."userDriveId"
           LEFT  JOIN vehicles v     ON v."userId" = freq."userDriveId"
                                    AND v."isMainVehicle" = true
-          WHERE freq."companyId" = $1
+          WHERE f."companyId" = $1
+            AND f."isExclude" = false
             AND freq.status = 'PENDING'
           ORDER BY
             CASE
@@ -1072,9 +1075,7 @@ export class DashboardService {
             COUNT(CASE
               WHEN EXTRACT(EPOCH FROM ($2 - freq."createdAt")) / 60 < 30
               THEN 1 END)                                AS immediate_response
-          FROM freight_requests freq
-          WHERE freq."companyId" = $1
-            AND freq.status = 'PENDING'
+          ${PENDING_SOLICITATIONS_FROM}
           `,
           [companyId, now],
         ),
@@ -1140,4 +1141,12 @@ export class DashboardService {
     }
   }
 
+  /** Total de solicitações em aberto da empresa (ver PENDING_SOLICITATIONS_FROM). */
+  private async countPendingSolicitations(companyId: string): Promise<number> {
+    const [row] = await this.freightRepository.manager.query(
+      `SELECT COUNT(freq.id) AS total ${PENDING_SOLICITATIONS_FROM}`,
+      [companyId],
+    );
+    return Number(row?.total ?? 0);
+  }
 }

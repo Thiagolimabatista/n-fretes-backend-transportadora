@@ -19,6 +19,8 @@ export enum FreightRequestStatus {
   DRIVER_CONFIRMED_DELIVERY = 'DRIVER_CONFIRMED_DELIVERY',
   DELIVERY_COMPLETED = 'DELIVERY_COMPLETED',
   NOT_CONFIRMED_DELIVERY = 'NOT_CONFIRMED_DELIVERY',
+  /** Motorista desistiu do frete depois de aceito (frete volta a receber solicitações). */
+  CANCELED_BY_DRIVER = 'CANCELED_BY_DRIVER',
 }
 
 @Entity('freight_requests')

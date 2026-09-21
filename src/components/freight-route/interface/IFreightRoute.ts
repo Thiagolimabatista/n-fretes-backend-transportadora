@@ -11,4 +11,6 @@ export interface ParamsFreightRoute {
   name?: string;
   isActive?: boolean;
   avalationUserDrive?: boolean;
+  /** ISO: só rotas com `completedAt` a partir desta data (kanban "Entrega confirmada"). */
+  completedSince?: string;
 }

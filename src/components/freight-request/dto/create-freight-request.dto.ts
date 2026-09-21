@@ -11,12 +11,15 @@ export class CreateFreightRequestDto {
   @IsString()
   freightId: string;
 
+  /** Ignorado: a empresa é a do token (dona do frete). */
   @ApiProperty({
-    description: 'Transportador id empresa',
+    description: 'Ignorado: a empresa é sempre a do token (dona do frete).',
     example: '550e8400-e29b-41d4-a716-446655440000',
+    required: false,
   })
   @IsString()
-  companyId: string;
+  @IsOptional()
+  companyId?: string;
 
   @ApiProperty({
     description: 'ID do motorista',
@@ -25,8 +28,10 @@ export class CreateFreightRequestDto {
   @IsString()
   userDriveId: string;
 
+  /** Ignorado: toda solicitação nasce PENDING. */
   @ApiProperty({
-    description: 'Status da solicitação de frete',
+    description: 'Ignorado: toda solicitação nasce PENDING.',
+    required: false,
     enum: FreightRequestStatus,
     example: FreightRequestStatus.PENDING,
   })

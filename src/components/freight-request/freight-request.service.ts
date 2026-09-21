@@ -1,6 +1,7 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { randomUUID } from 'crypto';
+import { EntityManager, In, Not, Repository } from 'typeorm';
 import {
   FreightRequest,
   FreightRequestStatus,
@@ -10,8 +11,11 @@ import { ParamsFreightRequest } from './interface/IFreightRequest';
 import { Freight } from '@entities/freight.entity';
 import { FreightRoutes, RouteStatus } from '@entities/freight-routes.entity';
 import { UsersDrive } from '@entities/users-drive.entity';
-import { addHoursToSaoPauloTime } from '@components/utils/formatTime-SP';
 import { SQSService } from '@components/sqs/sqs.service';
+import {
+  findOccupyingRouteId,
+  syncDriverOnRoute,
+} from '@components/freight-route/driver-on-route';
 import {
   EntityType,
   IconStyles,
@@ -19,8 +23,97 @@ import {
   NotificationCategory,
   NotificationStatus,
 } from '@entities/notifications.entity';
+
+/** Solicitações que a transportadora ainda pode aceitar ou recusar. */
+const OPEN_REQUEST_STATUSES: FreightRequestStatus[] = [
+  FreightRequestStatus.PENDING,
+  FreightRequestStatus.AWAITING_USER_DRIVE_RESPONSE,
+];
+
+/** Solicitações de motorista que está com o frete (rota em andamento). */
+const IN_ROUTE_REQUEST_STATUSES: FreightRequestStatus[] = [
+  FreightRequestStatus.ACCEPTED,
+  FreightRequestStatus.DRIVER_CONFIRMED_DELIVERY,
+  FreightRequestStatus.NOT_CONFIRMED_DELIVERY,
+];
+
+/** Motivo do 409 quando a solicitação não pode mais ser aceita/recusada. */
+const CLOSED_REQUEST_MESSAGES: Partial<Record<FreightRequestStatus, string>> = {
+  [FreightRequestStatus.ACCEPTED]: 'Esta solicitação já foi aceita.',
+  [FreightRequestStatus.DRIVER_CONFIRMED_DELIVERY]:
+    'Esta solicitação já foi aceita e o motorista informou a entrega.',
+  [FreightRequestStatus.NOT_CONFIRMED_DELIVERY]:
+    'Esta solicitação já foi aceita.',
+  [FreightRequestStatus.DELIVERY_COMPLETED]:
+    'Esta solicitação já foi concluída.',
+  [FreightRequestStatus.REJECTED]: 'Esta solicitação já foi recusada.',
+  [FreightRequestStatus.CANCELED_BY_DRIVER]:
+    'O motorista desistiu deste frete.',
+};
+
+/** Frete lido com `FOR UPDATE` dentro da transação do aceite. */
+interface LockedFreight {
+  id: string;
+  companyId: string | null;
+  isActive: boolean;
+  openSolicitations: boolean;
+  isExclude: boolean;
+  originCity: string | null;
+  originState: string | null;
+  originCityName: string | null;
+  destinyCity: string | null;
+  destinyState: string | null;
+  destinyCityName: string | null;
+}
+
+/** Aviso ao motorista via SQS, enviado depois do commit. */
+interface DriverMessage {
+  freightRequestId: string;
+  driverId: string;
+  freightId: string;
+  status: string;
+  expiresAt: string;
+  routeId?: string;
+}
+
+/** "Uberlândia/MG": cidade normalizada (coluna gerada) com a UF. */
+function placeLabel(
+  city: string | null,
+  cityName: string | null,
+  state: string | null,
+): string {
+  const name = cityName || city || 'origem não informada';
+  return state ? `${name}/${state}` : name;
+}
+
+function originLabel(freight: LockedFreight): string {
+  return placeLabel(
+    freight.originCity,
+    freight.originCityName,
+    freight.originState,
+  );
+}
+
+function destinyLabel(freight: LockedFreight): string {
+  return placeLabel(
+    freight.destinyCity,
+    freight.destinyCityName,
+    freight.destinyState,
+  );
+}
+
+function notFound(message = 'Solicitação não encontrada.'): HttpException {
+  return new HttpException(message, HttpStatus.NOT_FOUND);
+}
+
+function conflict(message: string, errorCode: string): HttpException {
+  return new HttpException({ message, errorCode }, HttpStatus.CONFLICT);
+}
+
 @Injectable()
 export class FreightRequestService {
+  private readonly logger = new Logger(FreightRequestService.name);
+
   constructor(
     @InjectRepository(FreightRequest)
     private readonly freightRequestRepository: Repository<FreightRequest>,
@@ -35,20 +128,44 @@ export class FreightRequestService {
     private readonly notificationRepository: Repository<Notification>,
   ) {}
 
+  /**
+   * Solicitação criada pela própria transportadora: o frete precisa ser dela,
+   * o `companyId` vem do token e o status começa sempre em PENDING.
+   */
   async create(
+    companyId: string,
     createFreightRequestDto: CreateFreightRequestDto,
   ): Promise<FreightRequest> {
+    const freight = await this.freightRepository.findOne({
+      where: { id: createFreightRequestDto.freightId, companyId },
+      select: ['id', 'companyId'],
+    });
+
+    if (!freight) {
+      throw notFound('Frete não encontrado.');
+    }
+
     try {
-      const newRequest = this.freightRequestRepository.create(
-        createFreightRequestDto,
-      );
+      const newRequest = this.freightRequestRepository.create({
+        freightId: freight.id,
+        userDriveId: createFreightRequestDto.userDriveId,
+        companyId: freight.companyId,
+        status: FreightRequestStatus.PENDING,
+      });
       return await this.freightRequestRepository.save(newRequest);
     } catch (error) {
-      console.error('Erro na solicitação do frete:', error);
-      throw new HttpException(error, HttpStatus.INTERNAL_SERVER_ERROR);
+      this.logger.error('Erro ao criar solicitação de frete', error);
+      throw new HttpException(
+        'Não foi possível registrar a solicitação.',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
+  /**
+   * Solicitações dos fretes da empresa. O dono é o do frete: o `companyId`
+   * gravado na solicitação vem do app do motorista.
+   */
   async findAll(userId: string, params: ParamsFreightRequest = {}) {
     try {
       const take = params.take ?? 10;
@@ -56,7 +173,7 @@ export class FreightRequestService {
 
       const queryBuilder = this.freightRequestRepository
         .createQueryBuilder('freight_requests')
-        .where('freight_requests.companyId = :companyId', {
+        .where('freight.companyId = :companyId', {
           companyId: userId,
         });
 
@@ -80,6 +197,8 @@ export class FreightRequestService {
           'freight_requests.status',
           'freight_requests.solicitationsOrder',
           'freight_requests.expiresAt',
+          'freight_requests.createdAt',
+          'freight_requests.updatedAt',
         ])
         .leftJoinAndSelect('freight_requests.freight', 'freight')
         .leftJoin('freight.contactCompany', 'contact_company')
@@ -108,13 +227,14 @@ export class FreightRequestService {
         ])
 
         .orderBy('freight_requests.solicitationsOrder', 'ASC')
+        .addOrderBy('freight_requests.createdAt', 'DESC')
         .skip((page - 1) * take)
         .take(take)
         .getManyAndCount();
 
       return { data: result, count: total };
     } catch (error) {
-      console.error('Erro no findAll:', error);
+      this.logger.error('Erro ao listar solicitações de frete', error);
       throw new HttpException(
         'Erro ao buscar as solicitações de frete.',
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -122,431 +242,615 @@ export class FreightRequestService {
     }
   }
 
-  async acceptFreightRequest(freightRequestId: string) {
+  /**
+   * Aceite em 1 passo: a transportadora escolhe o motorista e a rota começa.
+   *
+   * Numa transação, com o frete e o motorista travados (`FOR UPDATE`):
+   * solicitação -> ACCEPTED; cria a rota PROGUESS; fecha o frete; marca o
+   * motorista em rota; recusa as demais solicitações abertas do frete e
+   * grava as notificações. Os avisos SQS saem depois do commit.
+   */
+  async acceptFreightRequest(companyId: string, freightRequestId: string) {
+    const now = new Date();
+
     try {
-      const freightRequest = await this.freightRequestRepository.findOne({
-        where: { id: freightRequestId },
-        relations: ['freight', 'company'],
-      });
+      const outcome = await this.freightRequestRepository.manager.transaction(
+        async (manager) => {
+          const requestRepository = manager.getRepository(FreightRequest);
+          const { request, freight } = await this.lockOwnedRequest(
+            manager,
+            companyId,
+            freightRequestId,
+          );
 
-      if (!freightRequest) {
-        throw new HttpException(
-          'Freight request not found',
-          HttpStatus.NOT_FOUND,
-        );
-      }
+          if (IN_ROUTE_REQUEST_STATUSES.includes(request.status)) {
+            throw conflict(
+              CLOSED_REQUEST_MESSAGES[request.status],
+              'FREIGHT_REQUEST_ALREADY_ACCEPTED',
+            );
+          }
 
-      const freightId = freightRequest.freightId;
-      const userDriveId = freightRequest.userDriveId;
+          if (freight.isExclude) {
+            throw conflict('Este frete foi excluído.', 'FREIGHT_EXCLUDED');
+          }
 
-      freightRequest.status = FreightRequestStatus.AWAITING_USER_DRIVE_RESPONSE;
+          if (!freight.isActive || !freight.openSolicitations) {
+            throw conflict(
+              'Este frete já foi fechado e não recebe mais solicitações.',
+              'FREIGHT_CLOSED',
+            );
+          }
 
-      const currentDate = new Date();
-      const time = addHoursToSaoPauloTime(currentDate, 1);
-      freightRequest.expiresAt = time;
+          if (!OPEN_REQUEST_STATUSES.includes(request.status)) {
+            throw conflict(
+              CLOSED_REQUEST_MESSAGES[request.status] ??
+                'Esta solicitação não está mais aguardando resposta.',
+              'FREIGHT_REQUEST_NOT_OPEN',
+            );
+          }
 
-      await this.freightRequestRepository.save(freightRequest);
-      const notification = this.notificationRepository.create({
-        title: 'Frete aceito',
-        message: `A Transportadora ${freightRequest?.company?.name} aceitou seu frete ${freightRequest?.freight?.originCity} → ${freightRequest?.freight?.destinyCity}.`,
-        senderType: EntityType.COMPANY,
-        senderId: freightRequest.companyId,
-        recipientType: EntityType.USER,
-        recipientId: freightRequest.userDriveId,
-        category: NotificationCategory.FREIGHT,
-        status: NotificationStatus.UNREAD,
-        payload: {
-          message:
-            'Parabéns! Seu frete foi aceito. Confirme a solicitação para dar início a essa rota.',
+          if (!request.userDriveId) {
+            throw conflict(
+              'Solicitação sem motorista vinculado.',
+              'FREIGHT_REQUEST_WITHOUT_DRIVER',
+            );
+          }
+
+          const [driver] = await manager.query(
+            `SELECT "id", "name" FROM "users_drive" WHERE "id" = $1 FOR UPDATE`,
+            [request.userDriveId],
+          );
+
+          if (!driver) {
+            throw notFound('Motorista não encontrado.');
+          }
+
+          const routeRepository = manager.getRepository(FreightRoutes);
+
+          const freightRoute = await routeRepository.findOne({
+            where: {
+              freightId: freight.id,
+              status: RouteStatus.IN_PROGRESS,
+              isActive: true,
+            },
+            select: ['id'],
+          });
+
+          if (freightRoute) {
+            throw conflict(
+              'Este frete já tem um motorista em rota.',
+              'FREIGHT_ALREADY_IN_ROUTE',
+            );
+          }
+
+          // Não usa `users_drive.isOnRoute`: o campo fica desatualizado (o cron
+          // de conclusão automática não o zera). Vale a rota que ainda ocupa o
+          // motorista (entrega não informada por ele).
+          const driverRouteId = await findOccupyingRouteId(
+            manager,
+            request.userDriveId,
+          );
+
+          if (driverRouteId) {
+            throw conflict(
+              'Este motorista já está em outra rota em andamento.',
+              'DRIVER_ALREADY_IN_ROUTE',
+            );
+          }
+
+          const routeId = randomUUID();
+
+          await requestRepository.update(
+            { id: request.id },
+            { status: FreightRequestStatus.ACCEPTED, expiresAt: null },
+          );
+
+          await routeRepository.insert({
+            id: routeId,
+            freightId: freight.id,
+            userDriveId: request.userDriveId,
+            companyId: freight.companyId,
+            status: RouteStatus.IN_PROGRESS,
+            isActive: true,
+            startedAt: now,
+            completedAt: null,
+          });
+
+          await manager
+            .getRepository(Freight)
+            .update(
+              { id: freight.id },
+              { isActive: false, openSolicitations: false },
+            );
+
+          await manager
+            .getRepository(UsersDrive)
+            .update({ id: request.userDriveId }, { isOnRoute: true });
+
+          const others = await requestRepository.find({
+            where: {
+              freightId: freight.id,
+              id: Not(request.id),
+              status: In(OPEN_REQUEST_STATUSES),
+            },
+            select: ['id', 'userDriveId'],
+          });
+
+          if (others.length) {
+            await requestRepository.update(
+              { id: In(others.map((other) => other.id)) },
+              { status: FreightRequestStatus.REJECTED, expiresAt: null },
+            );
+          }
+
+          const companyName = await this.getCompanyName(manager, companyId);
+          const origin = originLabel(freight);
+          const destiny = destinyLabel(freight);
+
+          const notifications = [
+            this.notificationRepository.create({
+              title: 'Frete aceito',
+              message: `Frete aceito! Pode iniciar a rota de ${origin} para ${destiny}.`,
+              senderType: EntityType.COMPANY,
+              senderId: companyId,
+              recipientType: EntityType.USER,
+              recipientId: request.userDriveId,
+              category: NotificationCategory.FREIGHT,
+              status: NotificationStatus.UNREAD,
+              payload: {
+                message: `A transportadora ${companyName} aceitou você neste frete. Abra o app e boa viagem!`,
+                freightId: freight.id,
+                freightRequestId: request.id,
+                routeId,
+              },
+              iconStyle: IconStyles.FREIGHT_ACCEPTED,
+              createdAt: now,
+            }),
+            ...others
+              .filter((other) => other.userDriveId)
+              .map((other) =>
+                this.notificationRepository.create({
+                  title: 'Solicitação não aceita',
+                  message: `A transportadora ${companyName} não pôde aceitar sua solicitação do frete de ${origin} para ${destiny}.`,
+                  senderType: EntityType.COMPANY,
+                  senderId: companyId,
+                  recipientType: EntityType.USER,
+                  recipientId: other.userDriveId,
+                  category: NotificationCategory.FREIGHT,
+                  status: NotificationStatus.UNREAD,
+                  payload: {
+                    message:
+                      'O frete foi fechado com outro motorista. Continue buscando: novos fretes aparecem no app o tempo todo.',
+                    freightId: freight.id,
+                    freightRequestId: other.id,
+                  },
+                  iconStyle: IconStyles.FREIGHT_RECUSED,
+                  createdAt: now,
+                }),
+              ),
+          ];
+
+          await manager.getRepository(Notification).insert(notifications);
+
+          const messages: DriverMessage[] = [
+            {
+              freightRequestId: request.id,
+              driverId: request.userDriveId,
+              freightId: freight.id,
+              status: FreightRequestStatus.ACCEPTED,
+              expiresAt: '',
+              routeId,
+            },
+            ...others
+              .filter((other) => other.userDriveId)
+              .map((other) => ({
+                freightRequestId: other.id,
+                driverId: other.userDriveId,
+                freightId: freight.id,
+                status: FreightRequestStatus.REJECTED,
+                expiresAt: '',
+              })),
+          ];
+
+          return { routeId, freightRequestId: request.id, messages };
         },
-        iconStyle: IconStyles.FREIGHT_ACCEPTED,
-        createdAt: new Date(),
-      });
+      );
 
-      await this.notificationRepository.save(notification);
-
-      await this.sqsService.sendNotificationToDriver({
-        freightRequestId,
-        driverId: userDriveId,
-        freightId,
-        status: FreightRequestStatus.AWAITING_USER_DRIVE_RESPONSE,
-        expiresAt: time.toISOString(),
-      });
+      await this.notifyDrivers(outcome.messages);
 
       return {
         success: true,
-        message: 'Aguardando resposta do motorista.',
-        accepted: true,
-      };
-    } catch (error) {
-      if (error instanceof HttpException) {
-        const response = error.getResponse();
-        const statusCode = error.getStatus();
-        return {
-          code: statusCode,
-          error: response,
-        };
-      }
-
-      console.error('Erro no accept fretes:', error);
-      throw new HttpException(
-        error.message || 'Erro interno',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-  }
-
-  async confirmedFreightRequest(freightRequestId: string) {
-    try {
-      const freightRequest = await this.freightRequestRepository.findOne({
-        where: {
-          id: freightRequestId,
-          status: FreightRequestStatus.DRIVER_CONFIRMED_DELIVERY,
-        },
-        relations: ['freight', 'company'],
-      });
-
-      if (!freightRequest) {
-        throw new HttpException(
-          'Freight request not found',
-          HttpStatus.NOT_FOUND,
-        );
-      }
-
-      const freightId = freightRequest.freightId;
-      const userDriveId = freightRequest.userDriveId;
-
-      const activeRoute = await this.freightRoutesRepository.findOne({
-        where: {
-          userDriveId,
-          status: RouteStatus.IN_PROGRESS,
-          freightId: freightRequest.freightId,
-        },
-      });
-
-      if (activeRoute) {
-        activeRoute.status = RouteStatus.COMPLETED;
-        await this.freightRoutesRepository.save(activeRoute);
-      }
-
-      freightRequest.status = FreightRequestStatus.DELIVERY_COMPLETED;
-
-      const currentDate = new Date();
-      freightRequest.expiresAt = currentDate;
-      freightRequest.updatedAt = currentDate;
-
-      await this.freightRequestRepository.save(freightRequest);
-      const notification = this.notificationRepository.create({
-        title: 'Frete confirmado',
-        message: `A Transportadora ${freightRequest?.company?.name} confirmou a entrega ${freightRequest?.freight?.originCity} → ${freightRequest?.freight?.destinyCity}.`,
-        senderType: EntityType.COMPANY,
-        senderId: freightRequest.companyId,
-        recipientType: EntityType.USER,
-        recipientId: freightRequest.userDriveId,
-        category: NotificationCategory.FREIGHT,
-        status: NotificationStatus.UNREAD,
-        payload: {
-          message:
-            'Frete confirmado entregue não esqueça de avaliar esse frete.',
-        },
-        iconStyle: IconStyles.FREIGHT_ACCEPTED,
-        createdAt: new Date(),
-      });
-
-      await this.notificationRepository.save(notification);
-
-      await this.sqsService.sendNotificationToDriver({
-        freightRequestId,
-        driverId: userDriveId,
-        freightId,
-        status: FreightRequestStatus.DELIVERY_COMPLETED,
-        expiresAt: currentDate.toISOString(),
-      });
-
-      return {
-        success: true,
-        message: 'Frete confirmado.',
-        accepted: true,
-      };
-    } catch (error) {
-      if (error instanceof HttpException) {
-        const response = error.getResponse();
-        const statusCode = error.getStatus();
-        return {
-          code: statusCode,
-          error: response,
-        };
-      }
-
-      console.error('Erro no accept fretes:', error);
-      throw new HttpException(
-        error.message || 'Erro interno',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-  }
-
-  async rejectFreightRequest(freightRequestId: string) {
-    try {
-      const freightRequest = await this.freightRequestRepository.findOne({
-        where: { id: freightRequestId },
-        relations: ['freight', 'company'],
-      });
-
-      if (!freightRequest) {
-        throw new HttpException(
-          'Freight request not found',
-          HttpStatus.NOT_FOUND,
-        );
-      }
-
-      const freightId = freightRequest.freightId;
-      const userDriveId = freightRequest.userDriveId;
-
-      const activeRoute = await this.freightRoutesRepository.findOne({
-        where: {
-          userDriveId,
-          status: RouteStatus.IN_PROGRESS,
-          freightId: freightRequest.freightId,
-        },
-      });
-
-      if (activeRoute) {
-        activeRoute.status = RouteStatus.IN_PROGRESS;
-        await this.freightRoutesRepository.save(activeRoute);
-      }
-
-      freightRequest.status = FreightRequestStatus.REJECTED;
-
-      await this.freightRequestRepository.save(freightRequest);
-      const notification = this.notificationRepository.create({
-        title: 'Não podemos confirma sua entrega',
-        message: `A Transportadora ${freightRequest?.company?.name} não confirmou a entrega ${freightRequest?.freight?.originCity} → ${freightRequest?.freight?.destinyCity}.`,
-        senderType: EntityType.COMPANY,
-        senderId: freightRequest.companyId,
-        recipientType: EntityType.USER,
-        recipientId: freightRequest.userDriveId,
-        category: NotificationCategory.FREIGHT,
-        status: NotificationStatus.UNREAD,
-        payload: {
-          message:
-            'Transportadora informou que frete ainda não foi entregue caso precisa de ajuda entre em contato com nosso suporte. (34)99733-6677',
-        },
-        iconStyle: IconStyles.FREIGHT_ACCEPTED,
-        createdAt: new Date(),
-      });
-
-      await this.notificationRepository.save(notification);
-
-      await this.sqsService.sendNotificationToDriver({
-        freightRequestId,
-        driverId: userDriveId,
-        freightId,
-        status: FreightRequestStatus.NOT_CONFIRMED_DELIVERY,
-        expiresAt: new Date().toISOString(),
-      });
-
-      return {
-        success: true,
-        accepted: true,
-      };
-    } catch (error) {
-      if (error instanceof HttpException) {
-        const response = error.getResponse();
-        const statusCode = error.getStatus();
-        return {
-          code: statusCode,
-          error: response,
-        };
-      }
-
-      console.error('Erro no accept fretes:', error);
-      throw new HttpException(
-        error.message || 'Erro interno',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-  }
-
-  async acceptFreightRequestUserDrive(
-    freightRequestId: string,
-    status: FreightRequestStatus,
-  ) {
-    try {
-      if (
-        ![
-          FreightRequestStatus.ACCEPTED,
-          FreightRequestStatus.REJECTED,
-        ].includes(status)
-      ) {
-        throw new HttpException('Status inválido.', HttpStatus.BAD_REQUEST);
-      }
-
-      const freightRequest = await this.freightRequestRepository.findOneOrFail({
-        where: { id: freightRequestId },
-        relations: ['freight', 'freightRoutes'],
-      });
-
-      const userDriveId = freightRequest.userDriveId;
-
-      const activeRoute = await this.freightRoutesRepository.findOne({
-        where: { userDriveId, status: RouteStatus.IN_PROGRESS },
-      });
-
-      if (activeRoute) {
-        freightRequest.status = FreightRequestStatus.REJECTED;
-        await this.freightRequestRepository.save(freightRequest);
-
-        return {
-          success: false,
-          message: 'Rota ativa, solicitação rejeitada.',
-          accepted: false,
-        };
-      }
-
-      if (status === FreightRequestStatus.ACCEPTED) {
-        const userDrive = await this.userDriveRepository.findOneOrFail({
-          where: { id: userDriveId },
-        });
-
-        userDrive.isOnRoute = true;
-        await this.userDriveRepository.save(userDrive);
-
-        const newFreightRoute = this.freightRoutesRepository.create({
-          freightId: freightRequest.freightId,
-          userDriveId: freightRequest.userDriveId,
-          companyId: freightRequest.companyId,
-          status: RouteStatus.IN_PROGRESS,
-        });
-
-        await this.freightRoutesRepository.save(newFreightRoute);
-
-        if (freightRequest.freight) {
-          freightRequest.freight.isActive = false;
-          freightRequest.freight.openSolicitations = false;
-          await this.freightRepository.save(freightRequest.freight);
-        }
-
-        freightRequest.status = FreightRequestStatus.ACCEPTED;
-        await this.freightRequestRepository.save(freightRequest);
-
-        return {
-          success: true,
-          message: 'Solicitação de frete aceita com sucesso.',
-        };
-      } else {
-        freightRequest.status = FreightRequestStatus.REJECTED;
-        await this.freightRequestRepository.save(freightRequest);
-
-        return {
-          success: false,
-          message: 'Solicitação de frete rejeitada.',
-        };
-      }
-    } catch (error) {
-      if (error instanceof HttpException) {
-        return {
-          success: false,
-          error: error.getResponse(),
-          code: error.getStatus(),
-        };
-      }
-
-      console.error('Erro ao aceitar solicitação de frete:', error);
-      throw new HttpException(
-        error.message || 'Erro interno ao processar solicitação de frete.',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-  }
-
-  async acceptFreightRequestDirect(freightRequestId: string) {
-    try {
-      const freightRequest = await this.freightRequestRepository.findOne({
-        where: { id: freightRequestId },
-        relations: ['freight', 'company'],
-      });
-
-      if (!freightRequest) {
-        throw new HttpException(
-          'Freight request not found',
-          HttpStatus.NOT_FOUND,
-        );
-      }
-
-      if (!freightRequest.userDriveId) {
-        throw new HttpException(
-          'Solicitação sem motorista vinculado.',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-
-      const activeRoute = await this.freightRoutesRepository.findOne({
-        where: {
-          userDriveId: freightRequest.userDriveId,
-          status: RouteStatus.IN_PROGRESS,
-          isActive: true,
-        },
-      });
-
-      if (activeRoute) {
-        throw new HttpException(
-          'Motorista já possui rota ativa.',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-
-      const userDrive = await this.userDriveRepository.findOne({
-        where: { id: freightRequest.userDriveId },
-      });
-
-      if (!userDrive) {
-        throw new HttpException('Motorista não encontrado.', HttpStatus.NOT_FOUND);
-      }
-
-      userDrive.isOnRoute = true;
-      await this.userDriveRepository.save(userDrive);
-
-      const newFreightRoute = this.freightRoutesRepository.create({
-        freightId: freightRequest.freightId,
-        userDriveId: freightRequest.userDriveId,
-        companyId: freightRequest.companyId,
-        status: RouteStatus.IN_PROGRESS,
-        isActive: true,
-      });
-
-      await this.freightRoutesRepository.save(newFreightRoute);
-
-      if (freightRequest.freight) {
-        freightRequest.freight.isActive = false;
-        freightRequest.freight.openSolicitations = false;
-        await this.freightRepository.save(freightRequest.freight);
-      }
-
-      freightRequest.status = FreightRequestStatus.ACCEPTED;
-      freightRequest.expiresAt = null;
-      await this.freightRequestRepository.save(freightRequest);
-
-      return {
-        success: true,
-        message: 'Solicitação aceita e rota iniciada com sucesso.',
+        message: 'Motorista aceito. Ele foi avisado para iniciar a rota.',
+        routeId: outcome.routeId,
+        freightRequestId: outcome.freightRequestId,
         status: FreightRequestStatus.ACCEPTED,
-        routeId: newFreightRoute.id,
       };
     } catch (error) {
-      if (error instanceof HttpException) {
-        return {
-          success: false,
-          error: error.getResponse(),
-          code: error.getStatus(),
-        };
-      }
+      if (error instanceof HttpException) throw error;
 
-      console.error('Erro ao aceitar solicitação diretamente:', error);
+      this.logger.error('Erro ao aceitar solicitação de frete', error);
       throw new HttpException(
-        error.message || 'Erro interno ao aceitar solicitação de frete.',
+        'Não foi possível aceitar a solicitação agora. Tente novamente.',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
+  }
+
+  /**
+   * Transportadora confirma a entrega: rota -> COMPLETED (com `completedAt`),
+   * solicitação -> DELIVERY_COMPLETED e motorista fora de rota. Aceita a
+   * solicitação aceita (confirmação direto do monitoramento) ou com a
+   * entrega já informada pelo motorista.
+   */
+  async confirmedFreightRequest(companyId: string, freightRequestId: string) {
+    const now = new Date();
+
+    try {
+      const outcome = await this.freightRequestRepository.manager.transaction(
+        async (manager) => {
+          const { request, freight } = await this.lockOwnedRequest(
+            manager,
+            companyId,
+            freightRequestId,
+          );
+
+          if (request.status === FreightRequestStatus.DELIVERY_COMPLETED) {
+            throw conflict(
+              'Esta entrega já foi confirmada.',
+              'DELIVERY_ALREADY_CONFIRMED',
+            );
+          }
+
+          if (!IN_ROUTE_REQUEST_STATUSES.includes(request.status)) {
+            throw conflict(
+              'Esta solicitação não tem entrega em andamento.',
+              'FREIGHT_REQUEST_NOT_IN_ROUTE',
+            );
+          }
+
+          const routeRepository = manager.getRepository(FreightRoutes);
+          const activeRoute = await routeRepository.findOne({
+            where: {
+              userDriveId: request.userDriveId,
+              freightId: freight.id,
+              status: RouteStatus.IN_PROGRESS,
+            },
+            select: ['id'],
+            lock: { mode: 'pessimistic_write' },
+          });
+
+          if (activeRoute) {
+            await routeRepository.update(
+              { id: activeRoute.id },
+              {
+                status: RouteStatus.COMPLETED,
+                isActive: false,
+                completedAt: now,
+              },
+            );
+          }
+
+          await manager.getRepository(FreightRequest).update(
+            { id: request.id },
+            {
+              status: FreightRequestStatus.DELIVERY_COMPLETED,
+              expiresAt: now,
+            },
+          );
+
+          if (request.userDriveId) {
+            await syncDriverOnRoute(manager, request.userDriveId);
+          }
+
+          const companyName = await this.getCompanyName(manager, companyId);
+
+          await manager.getRepository(Notification).insert(
+            this.notificationRepository.create({
+              title: 'Entrega confirmada',
+              message: `A transportadora ${companyName} confirmou a entrega do frete de ${originLabel(freight)} para ${destinyLabel(freight)}.`,
+              senderType: EntityType.COMPANY,
+              senderId: companyId,
+              recipientType: EntityType.USER,
+              recipientId: request.userDriveId,
+              category: NotificationCategory.FREIGHT,
+              status: NotificationStatus.UNREAD,
+              payload: {
+                message:
+                  'Entrega confirmada. Não esqueça de avaliar este frete.',
+                freightId: freight.id,
+                freightRequestId: request.id,
+                routeId: activeRoute?.id ?? null,
+              },
+              iconStyle: IconStyles.FREIGHT_ACCEPTED,
+              createdAt: now,
+            }),
+          );
+
+          const messages: DriverMessage[] = request.userDriveId
+            ? [
+                {
+                  freightRequestId: request.id,
+                  driverId: request.userDriveId,
+                  freightId: freight.id,
+                  status: FreightRequestStatus.DELIVERY_COMPLETED,
+                  expiresAt: now.toISOString(),
+                  ...(activeRoute ? { routeId: activeRoute.id } : {}),
+                },
+              ]
+            : [];
+
+          return { routeId: activeRoute?.id ?? null, messages };
+        },
+      );
+
+      await this.notifyDrivers(outcome.messages);
+
+      return {
+        success: true,
+        message: 'Entrega confirmada.',
+        accepted: true,
+        status: FreightRequestStatus.DELIVERY_COMPLETED,
+        freightRequestId,
+        routeId: outcome.routeId,
+      };
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+
+      this.logger.error('Erro ao confirmar entrega', error);
+      throw new HttpException(
+        'Não foi possível confirmar a entrega agora. Tente novamente.',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * Recusa pela transportadora. Dois casos:
+   * - solicitação aberta (PENDING/AWAITING): vira REJECTED e o motorista é
+   *   avisado de que a transportadora não pôde aceitar a solicitação;
+   * - entrega informada pelo motorista (DRIVER_CONFIRMED_DELIVERY): a entrega
+   *   não é confirmada, a solicitação volta para ACCEPTED (rota segue em
+   *   andamento) e o motorista recebe o aviso de entrega não confirmada.
+   */
+  async rejectFreightRequest(companyId: string, freightRequestId: string) {
+    const now = new Date();
+
+    try {
+      const outcome = await this.freightRequestRepository.manager.transaction(
+        async (manager) => {
+          const { request, freight } = await this.lockOwnedRequest(
+            manager,
+            companyId,
+            freightRequestId,
+          );
+          const requestRepository = manager.getRepository(FreightRequest);
+          const companyName = await this.getCompanyName(manager, companyId);
+          const origin = originLabel(freight);
+          const destiny = destinyLabel(freight);
+
+          if (OPEN_REQUEST_STATUSES.includes(request.status)) {
+            await requestRepository.update(
+              { id: request.id },
+              { status: FreightRequestStatus.REJECTED, expiresAt: null },
+            );
+
+            if (request.userDriveId) {
+              await manager.getRepository(Notification).insert(
+                this.notificationRepository.create({
+                  title: 'Solicitação não aceita',
+                  message: `A transportadora ${companyName} não pôde aceitar sua solicitação do frete de ${origin} para ${destiny}.`,
+                  senderType: EntityType.COMPANY,
+                  senderId: companyId,
+                  recipientType: EntityType.USER,
+                  recipientId: request.userDriveId,
+                  category: NotificationCategory.FREIGHT,
+                  status: NotificationStatus.UNREAD,
+                  payload: {
+                    message:
+                      'A transportadora não pôde aceitar sua solicitação. Continue buscando: novos fretes aparecem no app o tempo todo.',
+                    freightId: freight.id,
+                    freightRequestId: request.id,
+                  },
+                  iconStyle: IconStyles.FREIGHT_RECUSED,
+                  createdAt: now,
+                }),
+              );
+            }
+
+            return {
+              status: FreightRequestStatus.REJECTED,
+              message: 'Solicitação recusada. O motorista foi avisado.',
+              messages: request.userDriveId
+                ? [
+                    {
+                      freightRequestId: request.id,
+                      driverId: request.userDriveId,
+                      freightId: freight.id,
+                      status: FreightRequestStatus.REJECTED,
+                      expiresAt: '',
+                    },
+                  ]
+                : [],
+            };
+          }
+
+          if (
+            request.status === FreightRequestStatus.DRIVER_CONFIRMED_DELIVERY
+          ) {
+            const activeRoute = await manager
+              .getRepository(FreightRoutes)
+              .findOne({
+                where: {
+                  userDriveId: request.userDriveId,
+                  freightId: freight.id,
+                  status: RouteStatus.IN_PROGRESS,
+                },
+                select: ['id'],
+              });
+
+            if (!activeRoute) {
+              throw conflict(
+                'A rota deste frete já foi encerrada. Não é possível recusar a entrega.',
+                'ROUTE_ALREADY_CLOSED',
+              );
+            }
+
+            await requestRepository.update(
+              { id: request.id },
+              { status: FreightRequestStatus.ACCEPTED, expiresAt: null },
+            );
+            await manager
+              .getRepository(UsersDrive)
+              .update({ id: request.userDriveId }, { isOnRoute: true });
+
+            await manager.getRepository(Notification).insert(
+              this.notificationRepository.create({
+                title: 'Não pudemos confirmar sua entrega',
+                message: `A transportadora ${companyName} não confirmou a entrega do frete de ${origin} para ${destiny}.`,
+                senderType: EntityType.COMPANY,
+                senderId: companyId,
+                recipientType: EntityType.USER,
+                recipientId: request.userDriveId,
+                category: NotificationCategory.FREIGHT,
+                status: NotificationStatus.UNREAD,
+                payload: {
+                  message:
+                    'A transportadora informou que o frete ainda não foi entregue. Se precisar de ajuda, fale com nosso suporte: (34) 99733-6677.',
+                  freightId: freight.id,
+                  freightRequestId: request.id,
+                  routeId: activeRoute.id,
+                },
+                iconStyle: IconStyles.FREIGHT_RECUSED,
+                createdAt: now,
+              }),
+            );
+
+            return {
+              status: FreightRequestStatus.ACCEPTED,
+              message: 'Entrega não confirmada. O motorista foi avisado.',
+              messages: [
+                {
+                  freightRequestId: request.id,
+                  driverId: request.userDriveId,
+                  freightId: freight.id,
+                  status: FreightRequestStatus.NOT_CONFIRMED_DELIVERY,
+                  expiresAt: now.toISOString(),
+                  routeId: activeRoute.id,
+                },
+              ],
+            };
+          }
+
+          throw conflict(
+            CLOSED_REQUEST_MESSAGES[request.status] ??
+              'Esta solicitação não pode ser recusada.',
+            'FREIGHT_REQUEST_NOT_REJECTABLE',
+          );
+        },
+      );
+
+      await this.notifyDrivers(outcome.messages);
+
+      return {
+        success: true,
+        message: outcome.message,
+        status: outcome.status,
+        freightRequestId,
+      };
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+
+      this.logger.error('Erro ao recusar solicitação de frete', error);
+      throw new HttpException(
+        'Não foi possível recusar a solicitação agora. Tente novamente.',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /** Frete travado para a transação (inclui as cidades normalizadas). */
+  private async lockFreight(
+    manager: EntityManager,
+    freightId: string,
+  ): Promise<LockedFreight | null> {
+    const [freight] = await manager.query(
+      `SELECT "id", "companyId", "isActive", "openSolicitations", "isExclude",
+              "originCity", "originState", "originCityName",
+              "destinyCity", "destinyState", "destinyCityName"
+         FROM "freight"
+        WHERE "id" = $1
+        FOR UPDATE`,
+      [freightId],
+    );
+    return freight ?? null;
+  }
+
+  /**
+   * Frete e solicitação travados, nessa ordem (a mesma em todos os fluxos,
+   * para não haver deadlock entre aceite, recusa e confirmação), desde que o
+   * frete seja da empresa do token. 404 caso contrário, sem revelar que o
+   * registro existe.
+   */
+  private async lockOwnedRequest(
+    manager: EntityManager,
+    companyId: string,
+    freightRequestId: string,
+  ): Promise<{ request: FreightRequest; freight: LockedFreight }> {
+    const requestRepository = manager.getRepository(FreightRequest);
+
+    const preview = await requestRepository.findOne({
+      where: { id: freightRequestId },
+      select: ['id', 'freightId'],
+    });
+
+    if (!preview?.freightId) {
+      throw notFound();
+    }
+
+    const freight = await this.lockFreight(manager, preview.freightId);
+
+    if (!freight || freight.companyId !== companyId) {
+      throw notFound();
+    }
+
+    const request = await requestRepository.findOne({
+      where: { id: freightRequestId },
+      lock: { mode: 'pessimistic_write' },
+    });
+
+    if (!request || request.freightId !== freight.id) {
+      throw notFound();
+    }
+
+    return { request, freight };
+  }
+
+  private async getCompanyName(
+    manager: EntityManager,
+    companyId: string,
+  ): Promise<string> {
+    const [company] = await manager.query(
+      `SELECT COALESCE(NULLIF("nameFantasy", ''), "name") AS "name" FROM "company" WHERE "id" = $1`,
+      [companyId],
+    );
+    return company?.name ?? '';
+  }
+
+  /**
+   * Avisos ao motorista (push via worker). Rodam depois do commit: uma falha
+   * na fila não desfaz o aceite, só fica registrada no log.
+   */
+  private async notifyDrivers(messages: DriverMessage[]): Promise<void> {
+    await Promise.all(
+      messages.map(async (message) => {
+        try {
+          await this.sqsService.sendNotificationToDriver(message);
+        } catch (error) {
+          this.logger.warn(
+            `Aviso SQS não enviado (solicitação ${message.freightRequestId}, status ${message.status}): ${error?.message ?? error}`,
+          );
+        }
+      }),
+    );
   }
 }

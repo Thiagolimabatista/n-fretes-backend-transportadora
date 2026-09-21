@@ -3,6 +3,7 @@ import { FreightRouteLocationsService } from './freight-route-locations.service'
 import { CreateRouteLocationDto } from './dto/create-route-location.dto';
 import { FreightRouteLocations } from '../../entities/freight-route-locations.entity';
 import { JwtAuthGuard } from '../../guards/jwt-auth-guard';
+import { GetUserId } from '../../decorators/get-user-decorator';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 
 @ApiTags('freight-route-locations')
@@ -20,9 +21,13 @@ export class FreightRouteLocationsController {
     description: 'The location has been successfully created.',
   })
   async create(
+    @GetUserId() companyId: string,
     @Body() createLocationDto: CreateRouteLocationDto,
   ): Promise<FreightRouteLocations> {
-    return await this.routeLocationsService.create(createLocationDto);
+    return await this.routeLocationsService.create(
+      companyId,
+      createLocationDto,
+    );
   }
 
   @Get('route/:routeId')
@@ -32,9 +37,10 @@ export class FreightRouteLocationsController {
     description: 'Return all locations for the route.',
   })
   async findByRouteId(
+    @GetUserId() companyId: string,
     @Param('routeId') routeId: string,
   ): Promise<FreightRouteLocations[]> {
-    return await this.routeLocationsService.findByRouteId(routeId);
+    return await this.routeLocationsService.findByRouteId(companyId, routeId);
   }
 
   @Get('route/:routeId/latest')
@@ -44,8 +50,12 @@ export class FreightRouteLocationsController {
     description: 'Return the latest location for the route.',
   })
   async getLatestLocation(
+    @GetUserId() companyId: string,
     @Param('routeId') routeId: string,
   ): Promise<FreightRouteLocations> {
-    return await this.routeLocationsService.getLatestLocation(routeId);
+    return await this.routeLocationsService.getLatestLocation(
+      companyId,
+      routeId,
+    );
   }
 }

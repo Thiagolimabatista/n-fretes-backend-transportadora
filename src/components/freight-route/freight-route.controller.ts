@@ -11,7 +11,6 @@ import {
 } from '@nestjs/common';
 import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
 import { GetUserId } from 'src/decorators/get-user-decorator';
-import { FreightRequestStatus } from '@entities/freight-requests.entity';
 import { FreightRouteService } from './freight-route.service';
 import { ParamsFreightRoute } from './interface/IFreightRoute';
 import { RouteStatus } from '@entities/freight-routes.entity';
@@ -52,10 +51,21 @@ export class FreightRouteController {
   @Patch(':id/status')
   @UseGuards(JwtAuthGuard)
   async updateStatus(
+    @GetUserId() companyId: string,
     @Param('id') routeId: string,
     @Body('status') status: RouteStatus,
   ) {
-    return this.freightRouteService.updateStatus(routeId, status);
+    return this.freightRouteService.updateStatus(companyId, routeId, status);
+  }
+
+  /** Linha do tempo da rota: eventos, pontos do rastreamento e resumo. */
+  @Get(':id/timeline')
+  @UseGuards(JwtAuthGuard)
+  async getTimeline(
+    @GetUserId() companyId: string,
+    @Param('id') routeId: string,
+  ) {
+    return this.freightRouteService.getTimeline(companyId, routeId);
   }
 
   @Delete(':id/hard-delete')

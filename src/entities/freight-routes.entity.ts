@@ -3,7 +3,6 @@ import {
   ManyToOne,
   Column,
   CreateDateColumn,
-  UpdateDateColumn,
   PrimaryColumn,
   JoinColumn,
   OneToMany,
@@ -75,8 +74,9 @@ export class FreightRoutes {
   @CreateDateColumn()
   startedAt: Date;
 
-  @UpdateDateColumn()
-  completedAt: Date;
+  /** Preenchida só quando a rota é concluída (COMPLETED); nula nos demais status. */
+  @Column({ type: 'timestamp', nullable: true })
+  completedAt: Date | null;
 
   @OneToMany(() => FreightRouteLocations, (location) => location.route)
   locations: FreightRouteLocations[];
