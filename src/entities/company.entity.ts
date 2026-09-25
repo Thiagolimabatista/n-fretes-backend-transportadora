@@ -117,6 +117,10 @@ export class Company {
   @Column({ nullable: true })
   photoUrl: string;
 
+  /** Cliente no Asaas, da época dos planos pagos (hoje desativados). */
+  @Column({ nullable: true })
+  assas_id: string;
+
   @Column({ nullable: true })
   siimpUsername: string;
 

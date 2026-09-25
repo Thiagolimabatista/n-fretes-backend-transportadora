@@ -1,5 +1,5 @@
 import { IsNotEmpty, IsString, IsArray, IsOptional } from 'class-validator';
-import { PartialType } from '@nestjs/swagger';
+import { PartialType } from '@nestjs/mapped-types';
 
 export class CreateContactGroupDto {
   @IsString()

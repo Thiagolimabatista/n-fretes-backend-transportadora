@@ -8,7 +8,6 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 import { ContactGroupService } from './contact-group.service';
 import {
   CreateContactGroupDto,
@@ -25,23 +24,12 @@ import {
 import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
 import { GetUserId } from 'src/decorators/get-user-decorator';
 
-@ApiTags('contact-group')
 @Controller('contact-group')
 @UseGuards(JwtAuthGuard)
 export class ContactGroupController {
   constructor(private readonly contactGroupService: ContactGroupService) {}
 
   @Post()
-  @ApiOperation({ summary: 'Criar novo grupo de contatos' })
-  @ApiResponse({
-    status: 201,
-    description: 'Grupo criado com sucesso',
-    type: ContactGroupResponseDto,
-  })
-  @ApiResponse({
-    status: 400,
-    description: 'Erro ao criar grupo',
-  })
   async createGroup(
     @Body() dto: CreateContactGroupDto,
     @GetUserId() companyId: string,
@@ -50,12 +38,6 @@ export class ContactGroupController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'Listar todos os grupos da empresa' })
-  @ApiResponse({
-    status: 200,
-    description: 'Grupos recuperados com sucesso',
-    type: GetContactGroupsResponseDto,
-  })
   async getGroups(
     @GetUserId() companyId: string,
   ): Promise<GetContactGroupsResponseDto> {
@@ -63,21 +45,6 @@ export class ContactGroupController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Buscar grupo específico por ID' })
-  @ApiParam({
-    name: 'id',
-    description: 'ID do grupo',
-    type: String,
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Grupo encontrado',
-    type: ContactGroupResponseDto,
-  })
-  @ApiResponse({
-    status: 404,
-    description: 'Grupo não encontrado',
-  })
   async getGroupById(
     @Param('id') groupId: string,
     @GetUserId() companyId: string,
@@ -86,21 +53,6 @@ export class ContactGroupController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Atualizar nome do grupo' })
-  @ApiParam({
-    name: 'id',
-    description: 'ID do grupo',
-    type: String,
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Grupo atualizado com sucesso',
-    type: ContactGroupUpdateResponseDto,
-  })
-  @ApiResponse({
-    status: 400,
-    description: 'Erro ao atualizar grupo',
-  })
   async updateGroup(
     @Param('id') groupId: string,
     @Body() dto: UpdateContactGroupDto,
@@ -110,17 +62,6 @@ export class ContactGroupController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Excluir grupo (soft delete)' })
-  @ApiParam({
-    name: 'id',
-    description: 'ID do grupo',
-    type: String,
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Grupo excluído com sucesso',
-    type: ContactGroupUpdateResponseDto,
-  })
   async deleteGroup(
     @Param('id') groupId: string,
     @GetUserId() companyId: string,
@@ -129,17 +70,6 @@ export class ContactGroupController {
   }
 
   @Post(':id/contacts')
-  @ApiOperation({ summary: 'Adicionar contatos ao grupo' })
-  @ApiParam({
-    name: 'id',
-    description: 'ID do grupo',
-    type: String,
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Contatos adicionados com sucesso',
-    type: ContactGroupUpdateResponseDto,
-  })
   async addContacts(
     @Param('id') groupId: string,
     @Body() dto: AddContactsToGroupDto,
@@ -149,17 +79,6 @@ export class ContactGroupController {
   }
 
   @Delete(':id/contacts')
-  @ApiOperation({ summary: 'Remover contatos do grupo' })
-  @ApiParam({
-    name: 'id',
-    description: 'ID do grupo',
-    type: String,
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Contatos removidos com sucesso',
-    type: ContactGroupUpdateResponseDto,
-  })
   async removeContacts(
     @Param('id') groupId: string,
     @Body() dto: RemoveContactsFromGroupDto,
@@ -173,17 +92,6 @@ export class ContactGroupController {
   }
 
   @Post(':id/move-contacts')
-  @ApiOperation({ summary: 'Mover contatos para outro grupo' })
-  @ApiParam({
-    name: 'id',
-    description: 'ID do grupo de origem',
-    type: String,
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Contatos movidos com sucesso',
-    type: ContactGroupUpdateResponseDto,
-  })
   async moveContacts(
     @Param('id') sourceGroupId: string,
     @Body() dto: MoveContactsToGroupDto,

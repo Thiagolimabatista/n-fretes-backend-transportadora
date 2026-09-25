@@ -1,4 +1,3 @@
-import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsBoolean, IsIn, IsOptional } from 'class-validator';
 
 export const NAVIGATION_LAYOUTS = ['side', 'top'] as const;
@@ -24,19 +23,16 @@ export const DEFAULT_PREFERENCES: UserPreferences = {
 };
 
 export class UpdatePreferencesDto {
-  @ApiPropertyOptional({ enum: NAVIGATION_LAYOUTS })
   @IsOptional()
   @IsIn(NAVIGATION_LAYOUTS, {
     message: 'Posição do menu inválida. Use "side" ou "top".',
   })
   navigationLayout?: NavigationLayout;
 
-  @ApiPropertyOptional({ enum: MENU_VIEWS })
   @IsOptional()
   @IsIn(MENU_VIEWS, { message: 'Tipo de menu inválido.' })
   menuView?: MenuView;
 
-  @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean({ message: 'sidebarCollapsed deve ser verdadeiro ou falso.' })
   sidebarCollapsed?: boolean;

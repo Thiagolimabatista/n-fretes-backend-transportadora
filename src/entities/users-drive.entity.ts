@@ -17,6 +17,8 @@ import { ReviewUserDrive } from './review-users-drive.entity';
 import { UserDriveAchievement } from './users-drive-achivement.entity';
 import { UsersFavoritesCompany } from './users-favorites-company.entity';
 
+/** Índice de expressão (CPF só com dígitos), criado na migration DriverNetworkIndexes. */
+@Index('IDX_users_drive_cpf_digits', { synchronize: false })
 @Entity({ schema: 'public', name: 'users_drive' })
 export class UsersDrive {
   @PrimaryColumn({ default: () => 'gen_random_uuid()' })

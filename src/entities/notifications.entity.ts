@@ -35,6 +35,8 @@ export enum IconStyles {
   WELCOME = 'welcome',
   UPGRADE = 'upgrade',
   FREIGHT_RECUSED = 'freightRecused',
+  DELIVERY_CONFIRMED = 'deliveryConfirmed',
+  AVALIATION = 'avaliation',
 }
 
 @Entity('notifications')

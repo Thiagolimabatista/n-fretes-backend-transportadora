@@ -1,11 +1,12 @@
 import { Module } from '@nestjs/common';
 import { SQSService } from './sqs.service';
-import { SQSConsumerService } from './sqs-consumer.service';
-import { SqsController } from './sqs.controller';
 
+/**
+ * Só publica. A fila de push ao motorista (QUEUE_SHARING_NOTIFICATION_FREIGHT)
+ * é consumida pelo n-fretes-workers.
+ */
 @Module({
-  controllers: [SqsController],
-  providers: [SQSService, SQSConsumerService],
+  providers: [SQSService],
   exports: [SQSService],
 })
 export class SqsModule {}

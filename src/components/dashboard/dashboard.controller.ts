@@ -2,56 +2,32 @@ import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { DashboardService } from './dashboard.service';
 import { GetUserId } from 'src/decorators/get-user-decorator';
 import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
-import { ApiTags } from '@nestjs/swagger';
 
-@ApiTags('dashboard')
+/** Página a partir de 1 e no máximo 50 itens, com fallback para valores inválidos. */
+function pagination(page?: string, limit?: string) {
+  const p = Math.floor(Number(page));
+  const l = Math.floor(Number(limit));
+  return {
+    page: Number.isFinite(p) && p >= 1 ? p : 1,
+    limit: Number.isFinite(l) && l >= 1 ? Math.min(l, 50) : 20,
+  };
+}
+
 @Controller('dashboard')
+@UseGuards(JwtAuthGuard)
 export class DashboardController {
   constructor(private readonly dashboardService: DashboardService) {}
 
-  @UseGuards(JwtAuthGuard)
-  @Get()
-  async getDashboard(@GetUserId() userId: string) {
-    return this.dashboardService.getCompanyDashboard(userId);
-  }
-
-  @UseGuards(JwtAuthGuard)
-  @Get('quick-stats')
-  async getQuickStats(@GetUserId() userId: string) {
-    return this.dashboardService.getQuickStats(userId);
-  }
-
-  @UseGuards(JwtAuthGuard)
-  @Get('freights-by-month')
-  async getFreightsByMonth(@GetUserId() userId: string) {
-    return this.dashboardService.getFreightsByMonth(userId);
-  }
-
-  @UseGuards(JwtAuthGuard)
-  @Get('freights-by-region')
-  async getFreightsByRegion(@GetUserId() userId: string) {
-    return this.dashboardService.getFreightsByRegion(userId);
-  }
-
-  @UseGuards(JwtAuthGuard)
-  @Get('metrics-dashboard')
-  async getMetricsDashboard(@GetUserId() userId: string) {
-    return this.dashboardService.getMetricsDashboard(userId);
-  }
-
-  @UseGuards(JwtAuthGuard)
   @Get('weekly-summary')
   async getWeeklySummary(@GetUserId() userId: string) {
     return this.dashboardService.getWeeklySummary(userId);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Get('daily-alerts')
   async getDailyAlerts(@GetUserId() userId: string) {
     return this.dashboardService.getDailyAlerts(userId);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Get('freight-volume')
   async getFreightVolume(
     @GetUserId() userId: string,
@@ -64,31 +40,23 @@ export class DashboardController {
     return this.dashboardService.getFreightVolume(userId, validPeriod);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Get('active-routes')
   async getActiveRoutes(
     @GetUserId() userId: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
-    return this.dashboardService.getActiveRoutes(
-      userId,
-      page ? Number(page) : 1,
-      limit ? Number(limit) : 20,
-    );
+    const p = pagination(page, limit);
+    return this.dashboardService.getActiveRoutes(userId, p.page, p.limit);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Get('pending-solicitations')
   async getPendingSolicitations(
     @GetUserId() userId: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
-    return this.dashboardService.getPendingSolicitations(
-      userId,
-      page ? Number(page) : 1,
-      limit ? Number(limit) : 20,
-    );
+    const p = pagination(page, limit);
+    return this.dashboardService.getPendingSolicitations(userId, p.page, p.limit);
   }
 }

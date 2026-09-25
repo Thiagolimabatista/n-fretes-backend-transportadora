@@ -1,15 +1,11 @@
 import { Body, Controller, Get, HttpException, HttpStatus, Param, Post, Query } from '@nestjs/common';
-import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { GeocodingService } from './geocoding.service';
 
-@ApiTags('geocoding')
 @Controller('geocoding')
 export class GeocodingController {
   constructor(private readonly geocodingService: GeocodingService) {}
 
   @Get('autocomplete')
-  @ApiOperation({ summary: 'Autocomplete de endereços' })
-  @ApiQuery({ name: 'input', required: true, description: 'Texto para busca' })
   async autocomplete(
     @Query('input') input: string,
     @Query('region') region?: string,
@@ -39,7 +35,6 @@ export class GeocodingController {
   }
 
   @Get('place/:placeId')
-  @ApiOperation({ summary: 'Busca coordenadas por placeId' })
   async getCoordinatesFromPlaceId(@Param('placeId') placeId: string) {
     if (!placeId || placeId.trim().length === 0) {
       throw new HttpException('placeId é obrigatório', HttpStatus.BAD_REQUEST);
@@ -49,7 +44,6 @@ export class GeocodingController {
   }
 
   @Get('distance')
-  @ApiOperation({ summary: 'Calcula distância entre 2 coordenadas (Haversine)' })
   async getDistance(
     @Query('lat1') lat1Param: string,
     @Query('lng1') lng1Param: string,
@@ -77,18 +71,6 @@ export class GeocodingController {
   }
 
   @Post('geocode')
-  @ApiOperation({ summary: 'Geocode de endereço para coordenadas' })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        address: { type: 'string', example: 'Av. Paulista, 1000 - São Paulo' },
-        region: { type: 'string', example: 'BR' },
-        language: { type: 'string', example: 'pt-BR' },
-      },
-      required: ['address'],
-    },
-  })
   async geocode(@Body() body: any) {
     const address = body?.address;
 
@@ -104,19 +86,6 @@ export class GeocodingController {
   }
 
   @Post('reverse-geocode')
-  @ApiOperation({ summary: 'Reverse geocode de coordenadas para endereço' })
-  @ApiBody({
-    schema: {
-      type: 'object',
-      properties: {
-        lat: { type: 'number', example: -23.561684 },
-        lng: { type: 'number', example: -46.655981 },
-        language: { type: 'string', example: 'pt-BR' },
-        result_type: { type: 'string', example: 'street_address' },
-      },
-      required: ['lat', 'lng'],
-    },
-  })
   async reverseGeocode(@Body() body: any) {
     const lat = Number(body?.lat);
     const lng = Number(body?.lng);
@@ -137,7 +106,6 @@ export class GeocodingController {
   }
 
   @Get('validate')
-  @ApiOperation({ summary: 'Valida endereço' })
   async validateAddress(@Query('address') address: string) {
     if (!address || address.trim().length === 0) {
       throw new HttpException('Parâmetro address é obrigatório', HttpStatus.BAD_REQUEST);

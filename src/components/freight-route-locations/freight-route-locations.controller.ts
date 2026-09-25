@@ -4,9 +4,7 @@ import { CreateRouteLocationDto } from './dto/create-route-location.dto';
 import { FreightRouteLocations } from '../../entities/freight-route-locations.entity';
 import { JwtAuthGuard } from '../../guards/jwt-auth-guard';
 import { GetUserId } from '../../decorators/get-user-decorator';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 
-@ApiTags('freight-route-locations')
 @Controller('freight-route-locations')
 @UseGuards(JwtAuthGuard)
 export class FreightRouteLocationsController {
@@ -15,11 +13,6 @@ export class FreightRouteLocationsController {
   ) {}
 
   @Post()
-  @ApiOperation({ summary: 'Create a new route location' })
-  @ApiResponse({
-    status: 201,
-    description: 'The location has been successfully created.',
-  })
   async create(
     @GetUserId() companyId: string,
     @Body() createLocationDto: CreateRouteLocationDto,
@@ -31,11 +24,6 @@ export class FreightRouteLocationsController {
   }
 
   @Get('route/:routeId')
-  @ApiOperation({ summary: 'Get all locations for a specific route' })
-  @ApiResponse({
-    status: 200,
-    description: 'Return all locations for the route.',
-  })
   async findByRouteId(
     @GetUserId() companyId: string,
     @Param('routeId') routeId: string,
@@ -44,11 +32,6 @@ export class FreightRouteLocationsController {
   }
 
   @Get('route/:routeId/latest')
-  @ApiOperation({ summary: 'Get the latest location for a specific route' })
-  @ApiResponse({
-    status: 200,
-    description: 'Return the latest location for the route.',
-  })
   async getLatestLocation(
     @GetUserId() companyId: string,
     @Param('routeId') routeId: string,

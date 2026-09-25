@@ -1,5 +1,6 @@
 import {
   Entity,
+  Index,
   ManyToOne,
   Column,
   CreateDateColumn,
@@ -20,6 +21,10 @@ export enum RouteStatus {
   CANCELED = 'CANCEL',
 }
 
+/** Índices criados na migration DashboardIndexes. */
+@Index('IDX_freight_routes_company_status', ['companyId', 'status'])
+@Index('IDX_freight_routes_freight', ['freightId'])
+@Index('IDX_freight_routes_driver_status', ['userDriveId', 'status'])
 @Entity('freight_routes')
 export class FreightRoutes {
   @PrimaryColumn({ default: () => 'gen_random_uuid()' })

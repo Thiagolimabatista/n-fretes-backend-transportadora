@@ -86,14 +86,14 @@ Mensagens que nunca podem aparecer na UI:
 |---|---|---|---|
 | Reset de senha alterava a senha antes de validar o código | `src/components/auth/auth.service.ts`, `changePasswordByRecoveryCode` | Takeover de empresa | **Corrigido nesta revisão:** código válido, telefone e expiração são verificados sob lock; senha e consumo do código usam a mesma transação. Ainda falta rate limit. |
 | Ativação pública de contato | `auth.controller.ts`, `POST /auth/update-company-login` | Definição arbitrária de e-mail/CPF/senha por `contactId` | Exigir convite assinado, expiração, uso único e prova de posse. |
-| JWT de integração aceito como JWT da empresa | `integrations.service.ts`, `jwt-auth-guard.ts` | Escalada para rotas protegidas | Secrets/audience/issuer/tipo separados; validar empresa, tenant e token type. |
-| API SDR sem guard aplicado | `sdr.controller.ts`; fallback em `api-key.guard.ts` | Exposição de CPF, telefone, e-mail e métricas | Aplicar guard global ao controller, remover fallback e rotacionar chave. |
+| JWT de integração aceito como JWT da empresa | `integrations.service.ts`, `jwt-auth-guard.ts` | Escalada para rotas protegidas | **Resolvido em 25/09/2026:** módulo `integrations` removido. |
+| API SDR sem guard aplicado | `sdr.controller.ts`; fallback em `api-key.guard.ts` | Exposição de CPF, telefone, e-mail e métricas | **Resolvido em 25/09/2026:** módulo `sdr` e `api-key.guard.ts` removidos. |
 | Webhook Asaas sem autenticação/idempotência | `webhook.assas.controller.ts`, `webhook.assas.service.ts` | Evento financeiro forjado ou repetido | Validar token/assinatura e gravar `eventId UNIQUE` antes de processar. |
 | Cartão excluído sem autenticação e token serializado | `assas.controller.ts`, `assas.service.ts`, `credit-card.entity.ts` | Exclusão de cartão de outra empresa e vazamento de token | Guard + consulta por `id/companyId`; DTO de saída sem token. |
 | Password/hash e PII em entidades/respostas | `company.entity.ts`, `contact-company.entity.ts`, `users-drive.entity.ts` | Vazamento de credencial e dados pessoais | `select:false`, DTOs explícitos de resposta e testes de serialização. |
-| Segredos hardcoded | `WHATSCODE`, `fretebras.service.ts`, `sapiens.service.ts` | Uso indevido de contas externas | Revogar/rotacionar, secret manager e limpeza do histórico Git. |
-| Endpoints administrativos públicos | `seed`, `sqs`, `fretebras`, `route-cache`, `ui-features` | Custo, fraude, alteração de dados e fila | Autenticação administrativa, RBAC, rate limit e trilha de auditoria. |
-| Consumer SQS apaga notificação sem processá-la | `sqs-consumer.service.ts` | Perda silenciosa de notificações | Definir ownership exclusivo da fila ou remover este consumer. |
+| Segredos hardcoded | `WHATSCODE`, `fretebras.service.ts`, `sapiens.service.ts` | Uso indevido de contas externas | `fretebras` e `sapiens` removidos em 25/09/2026. Os segredos continuam no histórico do Git: revogar/rotacionar. |
+| Endpoints administrativos públicos | `seed`, `sqs`, `fretebras`, `route-cache`, `ui-features` | Custo, fraude, alteração de dados e fila | `seed`, `fretebras`, `ui-features` e o controller do `sqs` removidos em 25/09/2026. Falta proteger `route-cache`. |
+| Consumer SQS apaga notificação sem processá-la | `sqs-consumer.service.ts` | Perda silenciosa de notificações | **Resolvido:** consumer removido; a fila é só do n-fretes-workers. |
 
 ## P1 — riscos altos
 
@@ -137,7 +137,6 @@ publicação, upload e criação de frete exigem idempotency key antes de retry.
 - Upload S3 seguido de falha no banco deixa arquivo órfão.
 - Cache QUALP usa apenas origem/destino, embora o resultado varie por eixos,
   combustível, consumo e tipo de rota.
-- Cache Sapiens ignora usuário, data e tipo de cotação.
 
 ### Frontend
 
@@ -154,7 +153,7 @@ publicação, upload e criação de frete exigem idempotency key antes de retry.
 ## P2 — confiabilidade e operação
 
 - `/healthcheck` não consulta banco nem confirma versão das migrations.
-- CORS e Swagger estão abertos.
+- CORS está aberto. (O Swagger foi removido dos três backends em 25/09/2026.)
 - JSON global aceita 50 MB.
 - Não há schema fail-fast para variáveis de ambiente.
 - Cron executa em toda réplica sem lock distribuído.

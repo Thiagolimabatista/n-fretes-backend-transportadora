@@ -4,7 +4,6 @@ import {
   Delete,
   Get,
   Param,
-  Patch,
   Post,
   Query,
   UploadedFile,
@@ -13,27 +12,17 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
-import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 
-import {
-  ContactCompanyErroUpdate,
-  ContactNotFound,
-  UpdateContactSucess,
-} from 'src/common/contact-company-swagger/contact-company';
 import { UsersContactCompanyService } from './users-contact.service';
-import {
-  CompanyUsersContactsDto,
-  updateCompanyUsersContactsDto,
-} from './dto/users-contact.dto';
-import {
-  CreateContactUsersCompanySucess,
-  GetUsersCompanySucess,
-} from 'src/common/users-contact-company-swagger/users-contact-company-swagger';
+import { CompanyUsersContactsDto } from './dto/users-contact.dto';
 import { ParamsUsersContactCompany } from './interfaces/IUsersContanctCompany';
 import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
 import { GetUserId } from 'src/decorators/get-user-decorator';
 
-@ApiTags('users-contact-company')
+/**
+ * Rede de motoristas da transportadora ("Meus motoristas"). A empresa vem
+ * sempre do token: nenhum endpoint aceita companyId vindo do cliente.
+ */
 @Controller('users-contact-company')
 export class UsersContactCompanyController {
   constructor(
@@ -42,112 +31,56 @@ export class UsersContactCompanyController {
 
   @UseGuards(JwtAuthGuard)
   @Post('/create')
-  @ApiOperation({
-    summary: 'Criação do contacto da empresa de caminhoneiro',
-  })
-  @ApiResponse(CreateContactUsersCompanySucess)
-  @ApiResponse({
-    status: 500,
-    description: 'Erro ao criar a contato da empresa',
-  })
   async createUsersContactCompany(
-    @Body() usersContactCompanyService: CompanyUsersContactsDto,
-  ): Promise<CompanyUsersContactsDto> {
-    return this.usersContactCompanyService.createUsersContactCompany(
-      usersContactCompanyService,
+    @GetUserId() companyId: string,
+    @Body() body: CompanyUsersContactsDto,
+  ) {
+    return this.usersContactCompanyService.createUsersContactCompany(companyId, body);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('get-all')
+  async getCompanyIdParams(
+    @GetUserId() companyId: string,
+    @Query() params: ParamsUsersContactCompany,
+  ) {
+    return this.usersContactCompanyService.getContactParamsUsers(companyId, params);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete(':id/soft-delete')
+  async softDelete(
+    @GetUserId() companyId: string,
+    @Param('id') id: string,
+  ): Promise<string> {
+    return this.usersContactCompanyService.softDeleteUsersContactCompany(companyId, id);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get(':cpf/contact')
+  async searchByCpf(@Param('cpf') cpf: string, @GetUserId() companyId: string) {
+    return this.usersContactCompanyService.searchUsersByCpf(cpf, companyId);
+  }
+
+  /** Viagens do motorista com a empresa do token (histórico no perfil). */
+  @UseGuards(JwtAuthGuard)
+  @Get('driver/:driverId/trips')
+  async listDriverTrips(
+    @GetUserId() companyId: string,
+    @Param('driverId') driverId: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.usersContactCompanyService.listDriverTripsWithCompany(
+      companyId,
+      driverId,
+      Number(page),
+      Number(limit),
     );
   }
 
-  /********************************************************************************** */
-
-  @UseGuards(JwtAuthGuard)
-  @Patch(':id')
-  @ApiOperation({ summary: 'Atualização de contato da empresa' })
-  @ApiParam({
-    name: 'id',
-    description:
-      'Id da contato para verificar se existe cadastrado na base de dados',
-    type: String,
-  })
-  @ApiResponse(UpdateContactSucess)
-  @ApiResponse(ContactNotFound)
-  @ApiResponse(ContactCompanyErroUpdate)
-  async updateContactCompany(
-    @Param('id') id: string,
-    @Body() updateContactCompany: updateCompanyUsersContactsDto,
-  ) {
-    const result =
-      await this.usersContactCompanyService.updateUsersContactCompany(
-        id,
-        updateContactCompany,
-      );
-    return result;
-  }
-
-  /********************************************************************************** */
-  @UseGuards(JwtAuthGuard)
-  @Get('get-all')
-  @ApiOperation({
-    summary: 'Traz o contato espefico pelo parametro passado pelo usuário',
-  })
-  @ApiResponse(GetUsersCompanySucess)
-  @ApiResponse(ContactNotFound)
-  @ApiResponse(ContactCompanyErroUpdate)
-  async getCompanyIdParams(@Query() params: ParamsUsersContactCompany) {
-    const result =
-      await this.usersContactCompanyService.getContactParamsUsers(params);
-    return result;
-  }
-
-  /********************************************************************************** */
-  @UseGuards(JwtAuthGuard)
-  @ApiOperation({
-    summary: 'Remove da lista de contatos da empresa',
-  })
-  @ApiParam({
-    name: 'id',
-    description: 'ID do contato da empresa',
-    type: String,
-  })
-  @Delete(':id/soft-delete')
-  async softDelete(@Param('id') id: string): Promise<string> {
-    return this.usersContactCompanyService.softDeleteUsersContactCompany(id);
-  }
-
-  /********************************************************************************** */
-  @UseGuards(JwtAuthGuard)
-  @ApiOperation({
-    summary: 'Remove da lista de contatos da empresa',
-  })
-  @ApiParam({
-    name: 'id',
-    description: 'ID do contato da empresa',
-    type: String,
-  })
-  @Get(':cpf/contact')
-  async searchByCpf(@Param('cpf') cpf: string, @GetUserId() userId: string) {
-    return this.usersContactCompanyService.searchUsersByCpf(cpf, userId);
-  }
-
-  /********************************************************************************** */
+  /** Público de propósito: página de convite de membro da equipe. */
   @Get(':id/contact-info')
-  @ApiOperation({
-    summary:
-      'Verifica status de registro do contato e retorna dados da empresa',
-  })
-  @ApiParam({
-    name: 'id',
-    description: 'ID do ContactCompany',
-    type: String,
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Informações do contato da empresa retornadas com sucesso',
-  })
-  @ApiResponse({
-    status: 404,
-    description: 'Contato da empresa não encontrado',
-  })
   async getContactCompanyInfo(@Param('id') id: string) {
     return this.usersContactCompanyService.getContactCompanyInfo(id);
   }
@@ -156,7 +89,6 @@ export class UsersContactCompanyController {
 
   @UseGuards(JwtAuthGuard)
   @Post(':driverId/documents')
-  @ApiOperation({ summary: 'Upload de documento para um motorista da empresa' })
   @UseInterceptors(
     FileInterceptor('file', {
       storage: memoryStorage(),
@@ -192,7 +124,6 @@ export class UsersContactCompanyController {
 
   @UseGuards(JwtAuthGuard)
   @Get(':driverId/documents')
-  @ApiOperation({ summary: 'Lista documentos de um motorista da empresa' })
   async listDriverDocuments(
     @GetUserId() companyId: string,
     @Param('driverId') driverId: string,
@@ -202,7 +133,6 @@ export class UsersContactCompanyController {
 
   @UseGuards(JwtAuthGuard)
   @Delete('documents/:documentId')
-  @ApiOperation({ summary: 'Remove (soft delete) um documento do motorista' })
   async deleteDriverDocument(
     @GetUserId() companyId: string,
     @Param('documentId') documentId: string,

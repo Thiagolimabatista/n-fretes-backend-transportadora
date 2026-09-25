@@ -1254,7 +1254,9 @@ async function main(): Promise<void> {
       freight: 'frios-curitiba-sp',
       driver: 'marcos',
       status: RouteStatus.IN_PROGRESS,
-      startedDaysAgo: 0,
+      // ~1h atrás: com 0 todos os pontos de GPS teriam o mesmo horário e o
+      // índice único (routeId, timestamp) recusaria o seed.
+      startedDaysAgo: 0.05,
       progress: 0.2,
     },
     {

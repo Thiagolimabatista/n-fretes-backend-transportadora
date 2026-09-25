@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule } from '@nestjs/config';
 
-import { PaginationService } from '@components/pagination/pagination.service';
 import { AwsService } from '@components/aws/aws.service';
 
 import { CompanyUsersContacts } from '@entities/company-users-contacts.entity';
@@ -31,6 +30,6 @@ import { UsersDrive } from '@entities/users-drive.entity';
   ],
   exports: [TypeOrmModule],
   controllers: [UsersContactCompanyController],
-  providers: [UsersContactCompanyService, PaginationService, AwsService],
+  providers: [UsersContactCompanyService, AwsService],
 })
 export class UsersContactCompanyModule {}

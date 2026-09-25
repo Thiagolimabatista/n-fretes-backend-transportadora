@@ -1,22 +1,15 @@
-import { HttpException, HttpStatus, Injectable, Inject } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Between } from 'typeorm';
-import { FreightRoutes, RouteStatus } from '@entities/freight-routes.entity';
-import { UsersDrive } from '@entities/users-drive.entity';
-import { CompanyUsersContacts } from '@entities/company-users-contacts.entity';
-import { ReviewUserDrive } from '@entities/review-users-drive.entity';
 import { Freight } from '@entities/freight.entity';
-import {
-  FreightRequest,
-  FreightRequestStatus,
-} from '@entities/freight-requests.entity';
-import { Vehicle } from '@entities/vehicles.entity';
 import {
   formatSaoPauloDate,
   lastSaoPauloDays,
   saoPauloDaySql,
   startOfSaoPauloDay,
+  SAO_PAULO_TZ,
 } from '@components/utils/formatTime-SP';
+import { occupyingRouteCondition } from '@components/freight-route/driver-on-route';
 
 /**
  * Solicitações em aberto da empresa: PENDING em fretes dela ainda não
@@ -30,574 +23,180 @@ const PENDING_SOLICITATIONS_FROM = `
     AND f."isExclude" = false
     AND freq.status = 'PENDING'`;
 
+/** Sem resposta há este tempo, a solicitação é urgente (alerta e prioridade ALTA). */
+const URGENT_WAIT_MINUTES = 60;
+/** A partir deste tempo sem resposta, prioridade MEDIA. */
+const ATTENTION_WAIT_MINUTES = 30;
+/** O lead time considera os fretes publicados nesta janela. */
+const LEAD_TIME_WINDOW_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Rota PROGUESS cuja entrega o motorista já informou: falta a transportadora
+ * confirmar. `alias` é o alias de `freight_routes` na consulta.
+ */
+function deliveryInformedCondition(alias: string): string {
+  return `EXISTS (
+    SELECT 1
+      FROM freight_requests informed
+     WHERE informed."freightId" = ${alias}."freightId"
+       AND informed."userDriveId" = ${alias}."userDriveId"
+       AND informed.status = 'DRIVER_CONFIRMED_DELIVERY'
+  )`;
+}
+
+/** Data (dia de São Paulo) de uma coluna timestamp gravada em UTC. */
+function saoPauloDateSql(column: string): string {
+  return `((${column} AT TIME ZONE 'UTC') AT TIME ZONE '${SAO_PAULO_TZ}')::date`;
+}
+
+/** Veículo principal do motorista (no máximo um por linha). */
+function mainVehicleJoin(driverColumn: string): string {
+  return `LEFT JOIN LATERAL (
+    SELECT mv."vehicleType", mv."bodyType", mv."plateNumber"
+      FROM vehicles mv
+     WHERE mv."userId" = ${driverColumn}
+       AND mv."isMainVehicle" = true
+     ORDER BY mv."createdAt" DESC
+     LIMIT 1
+  ) v ON true`;
+}
+
+function toNumberOrNull(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Number(n.toFixed(2)) : null;
+}
+
 @Injectable()
 export class DashboardService {
   constructor(
-    @InjectRepository(FreightRoutes)
-    private readonly freightRoutesRepository: Repository<FreightRoutes>,
-    @InjectRepository(CompanyUsersContacts)
-    private usersContactCompanyRepository: Repository<CompanyUsersContacts>,
-    @InjectRepository(ReviewUserDrive)
-    private reviewRepository: Repository<ReviewUserDrive>,
     @InjectRepository(Freight)
     private freightRepository: Repository<Freight>,
-    @InjectRepository(FreightRequest)
-    private freightRequestRepository: Repository<FreightRequest>,
-    @InjectRepository(Vehicle)
-    private vehicleRepository: Repository<Vehicle>,
   ) {}
 
-  async getCompanyDashboard(userId: string) {
-    try {
-      const currentDate = new Date();
-      const currentYear = currentDate.getFullYear();
-      const currentMonth = currentDate.getMonth() + 1;
-
-      const firstDayOfMonth = new Date(currentYear, currentDate.getMonth(), 1);
-      const lastDayOfMonth = new Date(
-        currentYear,
-        currentDate.getMonth() + 1,
-        0,
-      );
-      const yearStart = new Date(`${currentYear}-01-01`);
-      const yearEnd = new Date(`${currentYear}-12-31`);
-
-      const [
-        activeFreights,
-        allYearFreights,
-        reviews,
-        driversCount,
-        freightRoutes,
-        allFreights,
-      ] = await Promise.all([
-        this.freightRepository.find({
-          where: {
-            companyId: userId,
-            openSolicitations: true,
-            isActive: true,
-          },
-          select: ['id', 'Valuefreight'], // só buscar campos necessários
-        }),
-
-        this.freightRepository.find({
-          where: {
-            companyId: userId,
-            createdAt: Between(yearStart, yearEnd),
-          },
-          select: ['id', 'createdAt'], // só buscar campos necessários
-        }),
-
-        this.reviewRepository.find({
-          where: { companyId: userId, isUserReviewingCompany: true },
-          relations: ['userDrive'],
-          order: { createdAt: 'DESC' },
-        }),
-
-        this.usersContactCompanyRepository.count({
-          where: {
-            companyId: userId,
-            isActive: true,
-            createdAt: Between(firstDayOfMonth, lastDayOfMonth),
-          },
-        }),
-
-        // Fretes em andamento
-        this.freightRoutesRepository.find({
-          where: { companyId: userId, status: RouteStatus.IN_PROGRESS },
-          relations: ['userDrive', 'freight'],
-          select: {
-            id: true,
-            userDrive: { name: true },
-            freight: { originCity: true, destinyCity: true },
-          },
-        }),
-
-        // Todos os fretes para análise de destinos
-        this.freightRepository.find({
-          where: { companyId: userId },
-          select: ['destinyCity'],
-        }),
-      ]);
-
-      // Processamento dos fretes
-      const freightCount = activeFreights.length;
-      const averageFreightValue =
-        freightCount > 0
-          ? activeFreights.reduce(
-              (sum, freight) => sum + freight.Valuefreight,
-              0,
-            ) / freightCount
-          : 0;
-
-      const yearlyTotal = allYearFreights.length;
-      const monthlyAverage = yearlyTotal / currentMonth;
-
-      // Processamento mensal
-      const freightsByMonth = Array(currentMonth).fill(0);
-      allYearFreights.forEach((freight) => {
-        const month = new Date(freight.createdAt).getMonth();
-        if (month < currentMonth) {
-          freightsByMonth[month]++;
-        }
-      });
-
-      const monthlyFreightsData = freightsByMonth.map((count, index) => ({
-        month: index + 1,
-        monthName: new Date(2000, index, 1).toLocaleString('pt-BR', {
-          month: 'long',
-        }),
-        count,
-      }));
-
-      // Processamento das avaliações
-      const latestReviews = reviews.slice(0, 2).map((review) => ({
-        rating: review.rating,
-        comment: review.comment || 'Sem comentário',
-        userName: review.userDrive?.name || 'Anônimo',
-        date: review.createdAt.toISOString().split('T')[0],
-        photoUrl: review.userDrive?.photoFaceURL,
-      }));
-
-      const uniqueReviews = reviews.reduce((acc, review) => {
-        if (
-          review.userDriveId &&
-          !acc.some((r) => r.userDriveId === review.userDriveId)
-        ) {
-          acc.push(review);
-        }
-        return acc;
-      }, []);
-
-      const averageRating =
-        uniqueReviews.length > 0
-          ? uniqueReviews.reduce((sum, review) => sum + review.rating, 0) /
-            uniqueReviews.length
-          : 0;
-
-      // Nova funcionalidade: Distribuição de ratings
-      const ratingDistribution = {
-        5: 0,
-        4: 0,
-        3: 0,
-        2: 0,
-        1: 0,
-      };
-
-      uniqueReviews.forEach((review) => {
-        const rating = Math.floor(review.rating); // Garante que seja um número inteiro
-        if (rating >= 1 && rating <= 5) {
-          ratingDistribution[rating]++;
-        }
-      });
-
-      const destinationCounts = allFreights.reduce(
-        (acc, freight) => {
-          if (freight.destinyCity) {
-            acc[freight.destinyCity] = (acc[freight.destinyCity] || 0) + 1;
-          }
-          return acc;
-        },
-        {} as Record<string, number>,
-      );
-
-      const topDestinations = Object.entries(destinationCounts)
-        .filter(([_, count]) => count >= 3)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5)
-        .map(([city, count]) => ({ city, count }));
-
-      return {
-        freightStatistics: {
-          activeCount: freightCount,
-          averageValue: averageFreightValue,
-          monthlyAverage,
-          yearlyTotal,
-          monthlyFreights: monthlyFreightsData,
-          topDestinations,
-        },
-        ratingStatistics: {
-          averageRating,
-          totalRatings: uniqueReviews.length,
-          latestReviews,
-          ratingDistribution,
-        },
-        freightProguess: freightRoutes,
-        driversCount,
-      };
-    } catch (error) {
-      console.error('Dashboard Error:', error);
-      throw new HttpException(
-        'Failed to fetch dashboard data',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-  }
-
-  async getQuickStats(userId: string) {
-    try {
-      const [
-        activeFreightsCount,
-        totalFreightsCount,
-        openSolicitations,
-        pendingReviews,
-        driversInProgress,
-      ] = await Promise.all([
-        this.freightRepository.count({
-          where: {
-            companyId: userId,
-            openSolicitations: true,
-            isActive: true,
-          },
-        }),
-
-        this.freightRepository.count({
-          where: {
-            companyId: userId,
-          },
-        }),
-
-        this.countPendingSolicitations(userId),
-
-        this.freightRoutesRepository
-          .createQueryBuilder('route')
-          .leftJoin(
-            'route.reviewUserDrive',
-            'review',
-            'review.routeId = route.id AND review.isCompanyReviewingUser = true',
-          )
-          .where('route.companyId = :userId', { userId })
-          .andWhere('route.status = :status', { status: 'COMPLETED' })
-          .andWhere('review.id IS NULL')
-          .getCount(),
-
-        this.freightRoutesRepository.count({
-          where: {
-            companyId: userId,
-            status: RouteStatus.IN_PROGRESS,
-          },
-        }),
-      ]);
-
-      return {
-        activeFreights: activeFreightsCount,
-        totalFreights: totalFreightsCount,
-        openSolicitations: openSolicitations,
-        pendingReviews: pendingReviews,
-        driversInProgress: driversInProgress,
-      };
-    } catch (error) {
-      console.error('Quick Stats Error:', error);
-      throw new HttpException(
-        'Failed to fetch quick stats',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-  }
-
-  async getFreightsByMonth(userId: string) {
-    try {
-      const currentYear = new Date().getFullYear();
-
-      const freights = await this.freightRepository
-        .createQueryBuilder('freight')
-        .select('EXTRACT(MONTH FROM freight.createdAt)', 'month')
-        .addSelect('COUNT(*)', 'count')
-        .where('freight.companyId = :userId', { userId })
-        .andWhere('EXTRACT(YEAR FROM freight.createdAt) = :year', {
-          year: currentYear,
-        })
-        .groupBy('EXTRACT(MONTH FROM freight.createdAt)')
-        .orderBy('EXTRACT(MONTH FROM freight.createdAt)', 'ASC')
-        .getRawMany();
-
-      const monthlyData = freights.map((item) => {
-        const monthNumber = parseInt(item.month);
-        const monthName = new Date(
-          currentYear,
-          monthNumber - 1,
-          1,
-        ).toLocaleString('pt-BR', {
-          month: 'long',
-        });
-
-        return {
-          monthName: monthName.charAt(0).toUpperCase() + monthName.slice(1),
-          count: parseInt(item.count),
-        };
-      });
-
-      return monthlyData;
-    } catch (error) {
-      console.error('Freights by Month Error:', error);
-      throw new HttpException(
-        'Failed to fetch freights by month',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-  }
-
-  async getFreightsByRegion(userId: string) {
-    try {
-      const stateToRegion = {
-        AC: 'Norte',
-        AP: 'Norte',
-        AM: 'Norte',
-        PA: 'Norte',
-        RO: 'Norte',
-        RR: 'Norte',
-        TO: 'Norte',
-        AL: 'Nordeste',
-        BA: 'Nordeste',
-        CE: 'Nordeste',
-        MA: 'Nordeste',
-        PB: 'Nordeste',
-        PE: 'Nordeste',
-        PI: 'Nordeste',
-        RN: 'Nordeste',
-        SE: 'Nordeste',
-        GO: 'Centro-Oeste',
-        MT: 'Centro-Oeste',
-        MS: 'Centro-Oeste',
-        DF: 'Centro-Oeste',
-        ES: 'Sudeste',
-        MG: 'Sudeste',
-        RJ: 'Sudeste',
-        SP: 'Sudeste',
-        PR: 'Sul',
-        RS: 'Sul',
-        SC: 'Sul',
-      };
-
-      const freights = await this.freightRepository.find({
-        where: { companyId: userId },
-        select: ['originState'],
-      });
-
-      const regionCounts = {};
-      let totalFreights = 0;
-
-      freights.forEach((freight) => {
-        if (freight.originState) {
-          const uf = freight.originState.trim().toUpperCase();
-          const region = stateToRegion[uf] || 'Outros';
-          regionCounts[region] = (regionCounts[region] || 0) + 1;
-          totalFreights++;
-        }
-      });
-
-      const regionData = Object.entries(regionCounts)
-        .map(([region, count]) => ({
-          region,
-          count: count as number,
-          percentage: Math.round(((count as number) / totalFreights) * 100),
-        }))
-        .sort((a, b) => b.percentage - a.percentage);
-
-      return regionData;
-    } catch (error) {
-      console.error('Freights by Region Error:', error);
-      throw new HttpException(
-        'Failed to fetch freights by region',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-  }
-
-  async getMetricsDashboard(userId: string) {
-    try {
-      const currentDate = new Date();
-      const days = lastSaoPauloDays(14, currentDate);
-      const previous7DaysStart = startOfSaoPauloDay(days[0]);
-      const last7DaysStart = startOfSaoPauloDay(days[7]);
-      const previous7DaysEnd = new Date(last7DaysStart.getTime() - 1);
-
-      const [
-        totalFreights,
-        last7DaysFreights,
-        previous7DaysFreights,
-        activeFreights,
-        freightsInProgress,
-        pendingRequests,
-      ] = await Promise.all([
-        this.freightRepository.count({
-          where: { companyId: userId },
-        }),
-
-        this.freightRepository.count({
-          where: {
-            companyId: userId,
-            createdAt: Between(last7DaysStart, currentDate),
-          },
-        }),
-
-        this.freightRepository.count({
-          where: {
-            companyId: userId,
-            createdAt: Between(previous7DaysStart, previous7DaysEnd),
-          },
-        }),
-
-        this.freightRepository.count({
-          where: {
-            companyId: userId,
-            isActive: true,
-            openSolicitations: true,
-          },
-        }),
-
-        // Fretes em progresso (em rota)
-        this.freightRoutesRepository.count({
-          where: {
-            companyId: userId,
-            status: RouteStatus.IN_PROGRESS,
-          },
-        }),
-
-        // Solicitações de frete pendentes
-        this.countPendingSolicitations(userId),
-      ]);
-
-      let percentageChange = 0;
-      if (previous7DaysFreights > 0) {
-        percentageChange = ((last7DaysFreights - previous7DaysFreights) / previous7DaysFreights) * 100;
-      } else if (last7DaysFreights > 0) {
-        percentageChange = 100;
-      }
-
-      return {
-        totalFreights,
-        activeFreights,
-        freightsInProgress,
-        pendingRequests,
-        last7Days: {
-          count: last7DaysFreights,
-          percentageChange: Math.round(percentageChange * 100) / 100, 
-          comparison: percentageChange > 0 ? 'increase' : percentageChange < 0 ? 'decrease' : 'stable',
-          previousWeekCount: previous7DaysFreights,
-        },
-      };
-    } catch (error) {
-      console.error('Metrics Dashboard Error:', error);
-      throw new HttpException(
-        'Failed to fetch metrics dashboard data',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
+  private get db() {
+    return this.freightRepository.manager;
   }
 
   async getWeeklySummary(companyId: string) {
     try {
       const now = new Date();
-      const days = lastSaoPauloDays(7, now);
-      const start = startOfSaoPauloDay(days[0]);
-      const end = now;
+      const start = startOfSaoPauloDay(lastSaoPauloDays(7, now)[0]);
+      const leadStart = startOfSaoPauloDay(
+        lastSaoPauloDays(LEAD_TIME_WINDOW_DAYS, now)[0],
+      );
 
-      const [
-        totalPublished,
-        totalActive,
-        totalInRoute,
-        totalPendingRequests,
-        totalDriversInRoute,
-        leadTimeResult,
-      ] = await Promise.all([
-        // Total de fretes publicados nos últimos 7 dias (dias de São Paulo)
-        this.freightRepository.count({
-          where: {
-            companyId,
-            isExclude: false,
-            createdAt: Between(start, end),
-          },
-        }),
+      const [published, active, [routes], pending, [leadTime]] =
+        await Promise.all([
+          // Publicados nos últimos 7 dias (dias de São Paulo)
+          this.freightRepository.count({
+            where: { companyId, isExclude: false, createdAt: Between(start, now) },
+          }),
 
-        // Fretes ainda ativos (abertos para solicitação)
-        this.freightRepository.count({
-          where: {
-            companyId,
-            isExclude: false,
-            isActive: true,
-            openSolicitations: true,
-          },
-        }),
+          // Abertos: ativos e recebendo solicitações
+          this.freightRepository.count({
+            where: {
+              companyId,
+              isExclude: false,
+              isActive: true,
+              openSolicitations: true,
+            },
+          }),
 
-        // Fretes em rota (PROGUESS)
-        this.freightRoutesRepository.count({
-          where: {
-            companyId,
-            status: RouteStatus.IN_PROGRESS,
-          },
-        }),
-
-        // Solicitações em aberto: todas as PENDING da empresa (igual ao card)
-        this.countPendingSolicitations(companyId),
-
-        // Motoristas distintos em rota agora
-        this.freightRoutesRepository
-          .createQueryBuilder('fr')
-          .select('COUNT(DISTINCT fr.userDriveId)', 'total')
-          .where('fr.companyId = :companyId', { companyId })
-          .andWhere('fr.status = :status', { status: RouteStatus.IN_PROGRESS })
-          .andWhere('fr.userDriveId IS NOT NULL')
-          .getRawOne(),
-
-        // Lead time: publicação do frete -> 1ª solicitação recebida. Liga as
-        // solicitações só pelo frete (o companyId delas vem do app).
-        this.freightRepository.manager.query(
-          `
-          SELECT
-            COUNT(*)            AS sample_size,
-            AVG(lead_minutes)   AS avg_minutes,
-            MIN(lead_minutes)   AS min_minutes,
-            MAX(lead_minutes)   AS max_minutes
-          FROM (
+          // Rotas: em viagem (regra oficial de motorista ocupado) e entregas
+          // já informadas pelo motorista, esperando a confirmação da empresa.
+          this.db.query(
+            `
             SELECT
-              EXTRACT(EPOCH FROM (first_req.first_request_at - f."createdAt")) / 60 AS lead_minutes
-            FROM freight f
-            INNER JOIN (
-              SELECT "freightId", MIN("createdAt") AS first_request_at
-              FROM freight_requests
-              GROUP BY "freightId"
-            ) first_req ON first_req."freightId" = f.id
-            WHERE f."companyId" = $1
-              AND f."isExclude" = false
-              AND f."createdAt" BETWEEN $2 AND $3
-          ) samples
-          `,
-          [companyId, start, end],
-        ),
-      ]);
+              COUNT(*)                                                  AS in_progress,
+              COUNT(*) FILTER (WHERE ${occupyingRouteCondition('fr')})  AS in_transit,
+              COUNT(DISTINCT fr."userDriveId")
+                FILTER (WHERE ${occupyingRouteCondition('fr')})         AS drivers_in_transit,
+              COUNT(*) FILTER (
+                WHERE fr."isActive" = true AND ${deliveryInformedCondition('fr')}
+              )                                                         AS awaiting_confirmation
+            FROM freight_routes fr
+            WHERE fr."companyId" = $1
+              AND fr.status = 'PROGUESS'
+            `,
+            [companyId],
+          ),
 
-      const sampleSize = Number(leadTimeResult[0]?.sample_size ?? 0);
-      const minutesOrNull = (value: unknown): number | null =>
-        sampleSize > 0 && value !== null && value !== undefined
-          ? Number(Number(value).toFixed(2))
-          : null;
-      const avgMin = minutesOrNull(leadTimeResult[0]?.avg_minutes);
+          this.countPendingSolicitations(companyId, now),
+
+          // Lead time: publicação do frete -> 1ª solicitação de motorista.
+          // LATERAL busca a 1ª solicitação só dos fretes da empresa (usa o
+          // índice por freightId) em vez de agregar a tabela inteira.
+          this.db.query(
+            `
+            SELECT
+              COUNT(*)                                                  AS sample_size,
+              AVG(lead_minutes)                                         AS avg_minutes,
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY lead_minutes) AS median_minutes,
+              MIN(lead_minutes)                                         AS min_minutes,
+              MAX(lead_minutes)                                         AS max_minutes
+            FROM (
+              SELECT GREATEST(
+                       0,
+                       EXTRACT(EPOCH FROM (first_req.at - f."createdAt")) / 60
+                     ) AS lead_minutes
+              FROM freight f
+              CROSS JOIN LATERAL (
+                SELECT MIN(r."createdAt") AS at
+                  FROM freight_requests r
+                 WHERE r."freightId" = f.id
+              ) first_req
+              WHERE f."companyId" = $1
+                AND f."isExclude" = false
+                AND f."createdAt" BETWEEN $2 AND $3
+                AND first_req.at IS NOT NULL
+            ) samples
+            `,
+            [companyId, leadStart, now],
+          ),
+        ]);
+
+      const sampleSize = Number(leadTime?.sample_size ?? 0);
+      const minutes = (value: unknown) =>
+        sampleSize > 0 ? toNumberOrNull(value) : null;
+      const avgMinutes = minutes(leadTime?.avg_minutes);
 
       return {
         period: {
           startDate: formatSaoPauloDate(start),
-          endDate: formatSaoPauloDate(end),
+          endDate: formatSaoPauloDate(now),
           days: 7,
         },
         freights: {
-          publishedLast7Days: totalPublished,
-          currentlyActive: totalActive,
-          currentlyInRoute: totalInRoute,
+          publishedLast7Days: published,
+          currentlyActive: active,
+          /** Todas as rotas PROGUESS (em viagem + entrega a confirmar). */
+          currentlyInRoute: Number(routes?.in_progress ?? 0),
+        },
+        routes: {
+          inTransit: Number(routes?.in_transit ?? 0),
+          awaitingConfirmation: Number(routes?.awaiting_confirmation ?? 0),
         },
         solicitations: {
-          /** Mantido o nome por compatibilidade: são todas as PENDING da empresa. */
-          pendingLast7Days: totalPendingRequests,
-          pending: totalPendingRequests,
+          pending: pending.total,
+          /** Mantido por compatibilidade: são todas as PENDING da empresa. */
+          pendingLast7Days: pending.total,
+          urgent: pending.urgent,
+          urgentAfterMinutes: URGENT_WAIT_MINUTES,
         },
         drivers: {
-          currentlyInRoute: Number(totalDriversInRoute?.total ?? 0),
+          currentlyInRoute: Number(routes?.drivers_in_transit ?? 0),
         },
         leadTime: {
-          description: 'Tempo entre publicação do frete e 1ª solicitação recebida',
-          avgMinutes: avgMin,
-          avgHours: avgMin === null ? null : Number((avgMin / 60).toFixed(2)),
-          minMinutes: minutesOrNull(leadTimeResult[0]?.min_minutes),
-          maxMinutes: minutesOrNull(leadTimeResult[0]?.max_minutes),
+          description:
+            'Tempo entre a publicação do frete e a 1ª solicitação de motorista',
+          windowDays: LEAD_TIME_WINDOW_DAYS,
+          medianMinutes: minutes(leadTime?.median_minutes),
+          avgMinutes,
+          avgHours: avgMinutes === null ? null : Number((avgMinutes / 60).toFixed(2)),
+          minMinutes: minutes(leadTime?.min_minutes),
+          maxMinutes: minutes(leadTime?.max_minutes),
           sampleSize,
         },
         leadTimeSampleSize: sampleSize,
@@ -614,11 +213,12 @@ export class DashboardService {
     try {
       const now = new Date();
       // Janela de risco: rotas que vencem nas próximas 24h ou já atrasadas
-      const next24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+      const next24h = new Date(now.getTime() + DAY_MS);
 
       const [delayRiskRoutes, urgentSolicitations] = await Promise.all([
-        // Rotas em progresso com data de entrega já passada ou dentro de 24h
-        this.freightRepository.manager.query(
+        // Só rotas que ainda ocupam o motorista: se ele já informou a
+        // entrega, não é atraso, é confirmação pendente.
+        this.db.query(
           `
           SELECT
             fr.id                   AS route_id,
@@ -642,7 +242,7 @@ export class DashboardService {
           INNER JOIN freight f ON f.id = fr."freightId"
           LEFT  JOIN users_drive ud ON ud.id = fr."userDriveId"
           WHERE fr."companyId" = $1
-            AND fr.status = 'PROGUESS'
+            AND ${occupyingRouteCondition('fr')}
             AND f."dateReceiver" IS NOT NULL
             AND f."dateReceiver" <= $2
           ORDER BY f."dateReceiver" ASC
@@ -650,8 +250,8 @@ export class DashboardService {
           [companyId, next24h, now],
         ),
 
-        // Solicitações pendentes sem resposta criadas há mais de 1h
-        this.freightRepository.manager.query(
+        // Solicitações pendentes sem resposta há URGENT_WAIT_MINUTES ou mais
+        this.db.query(
           `
           SELECT
             freq.id                 AS solicitation_id,
@@ -672,13 +272,23 @@ export class DashboardService {
           WHERE f."companyId" = $1
             AND f."isExclude" = false
             AND freq.status = 'PENDING'
-            AND freq."createdAt" <= ($2 - INTERVAL '1 hour')
+            AND freq."createdAt" <= $3
           ORDER BY freq."createdAt" ASC
           `,
-          [companyId, now],
+          [companyId, now, new Date(now.getTime() - URGENT_WAIT_MINUTES * 60000)],
         ),
       ]);
 
+      const route = (r: any) => ({
+        routeId: r.route_id,
+        freightId: r.freight_id,
+        driverId: r.driver_id,
+        driverName: r.driver_name,
+        route: `${r.origin_city}/${r.origin_state} → ${r.destiny_city}/${r.destiny_state}`,
+        expectedDelivery: r.expected_delivery,
+        startedAt: r.started_at,
+        overdueHours: Number(r.overdue_hours),
+      });
       const lateRoutes = delayRiskRoutes.filter(
         (r: any) => r.alert_type === 'ATRASADA',
       );
@@ -695,26 +305,8 @@ export class DashboardService {
           total: delayRiskRoutes.length + urgentSolicitations.length,
         },
         alerts: {
-          lateRoutes: lateRoutes.map((r: any) => ({
-            routeId: r.route_id,
-            freightId: r.freight_id,
-            driverId: r.driver_id,
-            driverName: r.driver_name,
-            route: `${r.origin_city}/${r.origin_state} → ${r.destiny_city}/${r.destiny_state}`,
-            expectedDelivery: r.expected_delivery,
-            startedAt: r.started_at,
-            overdueHours: Number(r.overdue_hours),
-          })),
-          atRiskRoutes: atRiskRoutes.map((r: any) => ({
-            routeId: r.route_id,
-            freightId: r.freight_id,
-            driverId: r.driver_id,
-            driverName: r.driver_name,
-            route: `${r.origin_city}/${r.origin_state} → ${r.destiny_city}/${r.destiny_state}`,
-            expectedDelivery: r.expected_delivery,
-            startedAt: r.started_at,
-            overdueHours: Number(r.overdue_hours),
-          })),
+          lateRoutes: lateRoutes.map(route),
+          atRiskRoutes: atRiskRoutes.map(route),
           urgentSolicitations: urgentSolicitations.map((r: any) => ({
             solicitationId: r.solicitation_id,
             freightId: r.freight_id,
@@ -739,62 +331,64 @@ export class DashboardService {
       const now = new Date();
       const dayKeys = lastSaoPauloDays(period, now);
       const start = startOfSaoPauloDay(dayKeys[0]);
-      const end = now;
 
       const DAY_NAMES: Record<string, string> = {
         '0': 'Dom', '1': 'Seg', '2': 'Ter',
         '3': 'Qua', '4': 'Qui', '5': 'Sex', '6': 'Sáb',
       };
 
-      const [publicationsRows, deliveriesRows, driversRows, cohortRows] =
+      const [publicationsRows, deliveriesRows, driversRows, [cohort], [history]] =
         await Promise.all([
           // Publicações por dia
-          this.freightRepository.manager.query(
+          this.db.query(
             `
-            SELECT
-              ${saoPauloDaySql('f."createdAt"')}                   AS day_key,
-              COUNT(f.id)                                          AS total
+            SELECT ${saoPauloDaySql('f."createdAt"')} AS day_key, COUNT(f.id) AS total
             FROM freight f
             WHERE f."companyId" = $1
               AND f."isExclude" = false
               AND f."createdAt" BETWEEN $2 AND $3
             GROUP BY day_key
             `,
-            [companyId, start, end],
+            [companyId, start, now],
           ),
 
           // Entregas concluídas por dia
-          this.freightRepository.manager.query(
+          this.db.query(
             `
-            SELECT
-              ${saoPauloDaySql('fr."completedAt"')}                AS day_key,
-              COUNT(fr.id)                                         AS total
+            SELECT ${saoPauloDaySql('fr."completedAt"')} AS day_key, COUNT(fr.id) AS total
             FROM freight_routes fr
             WHERE fr."companyId" = $1
               AND fr.status = 'COMPLETED'
               AND fr."completedAt" BETWEEN $2 AND $3
             GROUP BY day_key
             `,
-            [companyId, start, end],
+            [companyId, start, now],
           ),
 
-          // Motoristas em rota por dia (contagem de rotas iniciadas naquele dia)
-          this.freightRepository.manager.query(
+          // Motoristas em rota em cada dia: rota iniciada até o dia e ainda
+          // em andamento, ou concluída naquele dia ou depois. Rotas
+          // canceladas ficam de fora (não guardam a data do cancelamento).
+          this.db.query(
             `
-            SELECT
-              ${saoPauloDaySql('fr."startedAt"')}                  AS day_key,
-              COUNT(DISTINCT fr."userDriveId")                     AS total
-            FROM freight_routes fr
-            WHERE fr."companyId" = $1
+            SELECT TO_CHAR(d.day, 'YYYY-MM-DD') AS day_key,
+                   COUNT(DISTINCT fr."userDriveId") AS total
+            FROM generate_series($2::date, $3::date, INTERVAL '1 day') AS d(day)
+            INNER JOIN freight_routes fr
+               ON fr."companyId" = $1
               AND fr."userDriveId" IS NOT NULL
-              AND fr."startedAt" BETWEEN $2 AND $3
-            GROUP BY day_key
+              AND fr.status IN ('PROGUESS', 'COMPLETED')
+              AND ${saoPauloDateSql('fr."startedAt"')} <= d.day
+              AND (
+                fr.status = 'PROGUESS'
+                OR ${saoPauloDateSql('fr."completedAt"')} >= d.day
+              )
+            GROUP BY d.day
             `,
-            [companyId, start, end],
+            [companyId, dayKeys[0], dayKeys[dayKeys.length - 1]],
           ),
 
           // Conversão: dos fretes publicados no período, quantos já foram entregues
-          this.freightRepository.manager.query(
+          this.db.query(
             `
             SELECT
               COUNT(f.id) AS published,
@@ -811,60 +405,79 @@ export class DashboardService {
               AND f."isExclude" = false
               AND f."createdAt" BETWEEN $2 AND $3
             `,
-            [companyId, start, end],
+            [companyId, start, now],
+          ),
+
+          // Histórico da empresa: define quais períodos têm dados de verdade
+          this.db.query(
+            `
+            SELECT MIN(f."createdAt") AS first_at, COUNT(f.id) AS total
+            FROM freight f
+            WHERE f."companyId" = $1
+              AND f."isExclude" = false
+            `,
+            [companyId],
           ),
         ]);
 
-      const days: string[] = dayKeys.map((key) => {
+      const labels = dayKeys.map((key) => {
         const [year, month, day] = key.split('-').map(Number);
         const dow = String(new Date(Date.UTC(year, month - 1, day)).getUTCDay());
-        const label = `${key.slice(8, 10)}/${key.slice(5, 7)}`;
-        return period === 7 ? DAY_NAMES[dow] : label;
+        return period === 7 ? DAY_NAMES[dow] : `${key.slice(8, 10)}/${key.slice(5, 7)}`;
       });
 
       const toMap = (rows: any[]) =>
         Object.fromEntries(rows.map((r) => [r.day_key, Number(r.total)]));
-
       const pubMap = toMap(publicationsRows);
       const delMap = toMap(deliveriesRows);
       const drvMap = toMap(driversRows);
 
       const publications = dayKeys.map((k) => pubMap[k] ?? 0);
-      const deliveries   = dayKeys.map((k) => delMap[k] ?? 0);
+      const deliveries = dayKeys.map((k) => delMap[k] ?? 0);
       const driversInRoute = dayKeys.map((k) => drvMap[k] ?? 0);
 
       const totalPublications = publications.reduce((a, b) => a + b, 0);
-      const totalDeliveries   = deliveries.reduce((a, b) => a + b, 0);
-      const cohortPublished = Number(cohortRows[0]?.published ?? 0);
-      const deliveredFromPublished = Number(cohortRows[0]?.delivered ?? 0);
+      const totalDeliveries = deliveries.reduce((a, b) => a + b, 0);
+      const cohortPublished = Number(cohort?.published ?? 0);
+      const deliveredFromPublished = Number(cohort?.delivered ?? 0);
       const conversionRate =
         cohortPublished > 0
-          ? Number(
-              ((deliveredFromPublished / cohortPublished) * 100).toFixed(1),
-            )
+          ? Number(((deliveredFromPublished / cohortPublished) * 100).toFixed(1))
           : 0;
 
-      // Pico: dia com mais publicações
-      const peakIndex = publications.indexOf(Math.max(...publications));
-      const peakDay = days[peakIndex] ?? null;
+      const peakValue = Math.max(...publications);
+      const peakDay = peakValue > 0 ? labels[publications.indexOf(peakValue)] : null;
+
+      // Períodos maiores só aparecem quando existe publicação antiga o
+      // bastante para eles: numa conta nova, 30d e 90d repetiriam os 7d.
+      const firstAt: Date | null = history?.first_at ? new Date(history.first_at) : null;
+      const hasData = Number(history?.total ?? 0) > 0;
+      const activityDays = firstAt
+        ? Math.floor((now.getTime() - firstAt.getTime()) / DAY_MS)
+        : 0;
+      const availablePeriods = hasData
+        ? [7, ...(activityDays >= 7 ? [30] : []), ...(activityDays >= 30 ? [90] : [])]
+        : [];
 
       return {
         period: {
           days: period,
           startDate: formatSaoPauloDate(start),
-          endDate: formatSaoPauloDate(end),
+          endDate: formatSaoPauloDate(now),
+        },
+        history: {
+          hasData,
+          firstPublicationAt: firstAt ? firstAt.toISOString() : null,
+          availablePeriods,
         },
         chart: {
-          labels: days,
-          series: {
-            publications,
-            deliveries,
-            driversInRoute,
-          },
+          labels,
+          series: { publications, deliveries, driversInRoute },
         },
         summary: {
           totalPublications,
           totalDeliveries,
+          avgPublicationsPerDay: Number((totalPublications / period).toFixed(1)),
           /** Entregues entre os publicados no período (nunca passa de 100%). */
           conversionRate,
           deliveredFromPublished,
@@ -879,57 +492,55 @@ export class DashboardService {
     }
   }
 
-  async getActiveRoutes(
-    companyId: string,
-    page = 1,
-    limit = 20,
-  ) {
+  async getActiveRoutes(companyId: string, page = 1, limit = 20) {
     try {
       const now = new Date();
       const offset = (page - 1) * limit;
+      const informed = deliveryInformedCondition('fr');
+      const lateOrRisk = `f."dateReceiver" IS NOT NULL AND f."dateReceiver"`;
 
-      const [rows, countResult] = await Promise.all([
-        this.freightRepository.manager.query(
+      const [rows, [count]] = await Promise.all([
+        this.db.query(
           `
           SELECT
-            fr.id                                   AS route_id,
-            fr."freightId"                          AS freight_id,
-            fr."userDriveId"                        AS driver_id,
-            fr."startedAt"                          AS started_at,
-            ud.name                                 AS driver_name,
-            ud."photoFaceURL"                       AS driver_photo,
-            f."originCity"                          AS origin_city,
-            f."originState"                         AS origin_state,
-            f."destinyCity"                         AS destiny_city,
-            f."destinyState"                        AS destiny_state,
-            f."dateReceiver"                        AS expected_delivery,
-            v."vehicleType"                         AS vehicle_type,
-            v."bodyType"                            AS body_type,
-            v."plateNumber"                         AS plate_number,
+            fr.id                  AS route_id,
+            fr."freightId"         AS freight_id,
+            fr."userDriveId"       AS driver_id,
+            fr."startedAt"         AS started_at,
+            ud.name                AS driver_name,
+            ud."photoFaceURL"      AS driver_photo,
+            f."originCity"         AS origin_city,
+            f."originState"        AS origin_state,
+            f."destinyCity"        AS destiny_city,
+            f."destinyState"       AS destiny_state,
+            f."dateReceiver"       AS expected_delivery,
+            v."vehicleType"        AS vehicle_type,
+            v."bodyType"           AS body_type,
+            v."plateNumber"        AS plate_number,
             CASE
-              WHEN f."dateReceiver" IS NOT NULL AND f."dateReceiver" < $2
-                THEN 'ATRASADA'
-              WHEN f."dateReceiver" IS NOT NULL AND f."dateReceiver" <= ($2 + INTERVAL '24 hours')
-                THEN 'RISCO_DE_ATRASO'
+              WHEN ${informed}                        THEN 'ENTREGA_INFORMADA'
+              WHEN ${lateOrRisk} < $2                 THEN 'ATRASADA'
+              WHEN ${lateOrRisk} <= ($2 + INTERVAL '24 hours') THEN 'RISCO_DE_ATRASO'
               ELSE 'EM_ROTA'
-            END                                     AS status,
+            END                    AS status,
             CASE
-              WHEN f."dateReceiver" IS NOT NULL AND f."dateReceiver" < $2
+              WHEN NOT ${informed} AND ${lateOrRisk} < $2
                 THEN ROUND(EXTRACT(EPOCH FROM ($2 - f."dateReceiver")) / 3600, 2)
               ELSE NULL
-            END                                     AS overdue_hours
+            END                    AS overdue_hours
           FROM freight_routes fr
           INNER JOIN freight f      ON f.id = fr."freightId"
           LEFT  JOIN users_drive ud ON ud.id = fr."userDriveId"
-          LEFT  JOIN vehicles v     ON v."userId" = fr."userDriveId"
-                                   AND v."isMainVehicle" = true
+          ${mainVehicleJoin('fr."userDriveId"')}
           WHERE fr."companyId" = $1
             AND fr.status = 'PROGUESS'
+            AND fr."isActive" = true
           ORDER BY
             CASE
-              WHEN f."dateReceiver" IS NOT NULL AND f."dateReceiver" < $2       THEN 1
-              WHEN f."dateReceiver" IS NOT NULL AND f."dateReceiver" <= ($2 + INTERVAL '24 hours') THEN 2
-              ELSE 3
+              WHEN NOT ${informed} AND ${lateOrRisk} < $2 THEN 1
+              WHEN ${informed}                            THEN 2
+              WHEN ${lateOrRisk} <= ($2 + INTERVAL '24 hours') THEN 3
+              ELSE 4
             END ASC,
             fr."startedAt" DESC
           LIMIT $3 OFFSET $4
@@ -937,18 +548,19 @@ export class DashboardService {
           [companyId, now, limit, offset],
         ),
 
-        this.freightRepository.manager.query(
+        this.db.query(
           `
           SELECT COUNT(fr.id) AS total
           FROM freight_routes fr
           WHERE fr."companyId" = $1
             AND fr.status = 'PROGUESS'
+            AND fr."isActive" = true
           `,
           [companyId],
         ),
       ]);
 
-      const total = Number(countResult[0]?.total ?? 0);
+      const total = Number(count?.total ?? 0);
       const totalPages = Math.ceil(total / limit);
 
       return {
@@ -996,104 +608,68 @@ export class DashboardService {
     }
   }
 
-  async getPendingSolicitations(
-    companyId: string,
-    page = 1,
-    limit = 20,
-  ) {
+  async getPendingSolicitations(companyId: string, page = 1, limit = 20) {
     try {
       const now = new Date();
       const offset = (page - 1) * limit;
+      const waiting = `EXTRACT(EPOCH FROM ($2 - freq."createdAt")) / 60`;
 
-      const [rows, countResult] = await Promise.all([
-        this.freightRepository.manager.query(
+      const [rows, pending] = await Promise.all([
+        this.db.query(
           `
           SELECT
-            freq.id                                       AS solicitation_id,
-            freq."freightId"                             AS freight_id,
-            freq."createdAt"                             AS requested_at,
-
-            -- Frete
-            f."originCity"                               AS origin_city,
-            f."originState"                              AS origin_state,
-            f."destinyCity"                              AS destiny_city,
-            f."destinyState"                             AS destiny_state,
-            f."dateOrigin"                               AS date_origin,
-
-            -- Contato/vendedor vinculado ao frete
-            cc.id                                        AS contact_id,
-            cc.name                                      AS contact_name,
-            cc."phoneNumber"                             AS contact_phone,
-
-            -- Motorista
-            ud.id                                        AS driver_id,
-            ud.name                                      AS driver_name,
-            ud."photoFaceURL"                            AS driver_photo,
-
-            -- Ve\u00edculo principal do motorista
-            v."vehicleType"                              AS vehicle_type,
-            v."bodyType"                                 AS body_type,
-            v."plateNumber"                              AS plate_number,
-
-            -- Tempo de espera em minutos
-            ROUND(
-              EXTRACT(EPOCH FROM ($2 - freq."createdAt")) / 60, 2
-            )                                            AS waiting_minutes,
-
-            -- Prioridade baseada no tempo de espera
+            freq.id                AS solicitation_id,
+            freq."freightId"       AS freight_id,
+            freq."createdAt"       AS requested_at,
+            f."originCity"         AS origin_city,
+            f."originState"        AS origin_state,
+            f."destinyCity"        AS destiny_city,
+            f."destinyState"       AS destiny_state,
+            f."dateOrigin"         AS date_origin,
+            cc.id                  AS contact_id,
+            cc.name                AS contact_name,
+            cc."phoneNumber"       AS contact_phone,
+            ud.id                  AS driver_id,
+            ud.name                AS driver_name,
+            ud."photoFaceURL"      AS driver_photo,
+            v."vehicleType"        AS vehicle_type,
+            v."bodyType"           AS body_type,
+            v."plateNumber"        AS plate_number,
+            ROUND(${waiting}, 2)   AS waiting_minutes,
             CASE
-              WHEN EXTRACT(EPOCH FROM ($2 - freq."createdAt")) / 60 >= 120 THEN 'ALTA'
-              WHEN EXTRACT(EPOCH FROM ($2 - freq."createdAt")) / 60 >= 30  THEN 'MEDIA'
+              WHEN ${waiting} >= ${URGENT_WAIT_MINUTES}    THEN 'ALTA'
+              WHEN ${waiting} >= ${ATTENTION_WAIT_MINUTES} THEN 'MEDIA'
               ELSE 'BAIXA'
-            END                                          AS priority
-
+            END                    AS priority
           FROM freight_requests freq
           INNER JOIN freight f      ON f.id = freq."freightId"
           LEFT  JOIN "contact-company" cc ON cc.id = f."contactCompanyId"
           LEFT  JOIN users_drive ud ON ud.id = freq."userDriveId"
-          LEFT  JOIN vehicles v     ON v."userId" = freq."userDriveId"
-                                   AND v."isMainVehicle" = true
+          ${mainVehicleJoin('freq."userDriveId"')}
           WHERE f."companyId" = $1
             AND f."isExclude" = false
             AND freq.status = 'PENDING'
-          ORDER BY
-            CASE
-              WHEN EXTRACT(EPOCH FROM ($2 - freq."createdAt")) / 60 >= 120 THEN 1
-              WHEN EXTRACT(EPOCH FROM ($2 - freq."createdAt")) / 60 >= 30  THEN 2
-              ELSE 3
-            END ASC,
-            freq."createdAt" ASC
+          ORDER BY freq."createdAt" ASC
           LIMIT $3 OFFSET $4
           `,
           [companyId, now, limit, offset],
         ),
-
-        this.freightRepository.manager.query(
-          `
-          SELECT
-            COUNT(freq.id)                               AS total,
-            COUNT(CASE
-              WHEN EXTRACT(EPOCH FROM ($2 - freq."createdAt")) / 60 < 30
-              THEN 1 END)                                AS immediate_response
-          ${PENDING_SOLICITATIONS_FROM}
-          `,
-          [companyId, now],
-        ),
+        this.countPendingSolicitations(companyId, now),
       ]);
 
-      const total = Number(countResult[0]?.total ?? 0);
-      const immediateResponse = Number(countResult[0]?.immediate_response ?? 0);
-      const totalPages = Math.ceil(total / limit);
+      const totalPages = Math.ceil(pending.total / limit);
 
       return {
         summary: {
-          total,
-          immediateResponse,
+          total: pending.total,
+          urgent: pending.urgent,
+          /** Chegaram há menos de ATTENTION_WAIT_MINUTES. */
+          immediateResponse: pending.recent,
         },
         pagination: {
           page,
           limit,
-          total,
+          total: pending.total,
           totalPages,
           hasNext: page < totalPages,
           hasPrev: page > 1,
@@ -1105,11 +681,7 @@ export class DashboardService {
           waitingMinutes: Number(r.waiting_minutes),
           priority: r.priority,
           seller: r.contact_id
-            ? {
-                id: r.contact_id,
-                name: r.contact_name,
-                phone: r.contact_phone ?? null,
-              }
+            ? { id: r.contact_id, name: r.contact_name, phone: r.contact_phone ?? null }
             : null,
           route: {
             originCity: r.origin_city,
@@ -1141,12 +713,27 @@ export class DashboardService {
     }
   }
 
-  /** Total de solicitações em aberto da empresa (ver PENDING_SOLICITATIONS_FROM). */
-  private async countPendingSolicitations(companyId: string): Promise<number> {
-    const [row] = await this.freightRepository.manager.query(
-      `SELECT COUNT(freq.id) AS total ${PENDING_SOLICITATIONS_FROM}`,
-      [companyId],
+  /**
+   * Solicitações em aberto da empresa (ver PENDING_SOLICITATIONS_FROM):
+   * total, urgentes (sem resposta há URGENT_WAIT_MINUTES) e recentes.
+   */
+  private async countPendingSolicitations(companyId: string, now: Date) {
+    const [row] = await this.db.query(
+      `SELECT
+         COUNT(freq.id) AS total,
+         COUNT(freq.id) FILTER (WHERE freq."createdAt" <= $2) AS urgent,
+         COUNT(freq.id) FILTER (WHERE freq."createdAt" > $3)  AS recent
+       ${PENDING_SOLICITATIONS_FROM}`,
+      [
+        companyId,
+        new Date(now.getTime() - URGENT_WAIT_MINUTES * 60000),
+        new Date(now.getTime() - ATTENTION_WAIT_MINUTES * 60000),
+      ],
     );
-    return Number(row?.total ?? 0);
+    return {
+      total: Number(row?.total ?? 0),
+      urgent: Number(row?.urgent ?? 0),
+      recent: Number(row?.recent ?? 0),
+    };
   }
 }

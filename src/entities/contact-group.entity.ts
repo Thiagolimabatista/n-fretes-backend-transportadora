@@ -1,5 +1,6 @@
 import {
   Entity,
+  Index,
   Column,
   PrimaryColumn,
   ManyToOne,
@@ -12,6 +13,8 @@ import {
 import { Company } from './company.entity';
 import { CompanyUsersContacts } from './company-users-contacts.entity';
 
+/** Índices criados na migration DriverNetworkIndexes. */
+@Index('IDX_contact_group_company', ['companyId'], { where: '"isActive" = true' })
 @Entity({ schema: 'public', name: 'contact-group' })
 export class ContactGroup {
   @PrimaryColumn({ default: () => 'gen_random_uuid()' })

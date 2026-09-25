@@ -146,6 +146,7 @@ export class Freight {
   @JoinColumn({ name: 'contactCompanyId' })
   contactCompany: ContactCompany;
 
+  /** Demais responsáveis do frete (ids de contact-company), em ordem. */
   @Column({ type: 'simple-array', nullable: true })
   contactCompanyIds: string[];
 
@@ -204,6 +205,7 @@ export class Freight {
   @Column({ default: false })
   isFeatured: boolean;
 
+  /** Frete excluído pela transportadora (fica fora de todas as buscas). */
   @Column({ default: false })
   isExclude: boolean;
 

@@ -1,5 +1,6 @@
 import {
   Entity,
+  Index,
   PrimaryColumn,
   Column,
   CreateDateColumn,
@@ -10,6 +11,8 @@ import {
 import { Company } from './company.entity';
 import { UsersDrive } from './users-drive.entity';
 
+/** Índices criados na migration DriverNetworkIndexes. */
+@Index('IDX_driver_documents_company_user', ['companyId', 'userId'], { where: '"isActive" = true' })
 @Entity({ schema: 'public', name: 'driver-documents' })
 export class DriverDocument {
   @PrimaryColumn({ default: () => 'gen_random_uuid()' })

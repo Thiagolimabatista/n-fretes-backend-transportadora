@@ -1,5 +1,6 @@
 import {
   Entity,
+  Index,
   Column,
   ManyToOne,
   JoinColumn,
@@ -10,6 +11,8 @@ import {
 import { UsersDrive } from './users-drive.entity';
 import { VehicleType, BodyType } from 'src/enum/vehicle';
 
+/** Veículo principal de cada motorista (migration DashboardIndexes). */
+@Index('IDX_vehicles_user_main', ['userId'], { where: '"isMainVehicle" = true' })
 @Entity({ schema: 'public', name: 'vehicles' })
 export class Vehicle {
   @PrimaryColumn({ default: () => 'gen_random_uuid()' })
