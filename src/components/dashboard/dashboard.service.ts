@@ -12,15 +12,18 @@ import {
 import { occupyingRouteCondition } from '@components/freight-route/driver-on-route';
 
 /**
- * Solicitações em aberto da empresa: PENDING em fretes dela ainda não
- * excluídos. O dono é o do frete (o `companyId` da solicitação vem do app).
- * Mesma regra no card do painel, no resumo semanal e na lista de pendentes.
+ * Solicitações em aberto da empresa: PENDING em fretes dela ainda publicados
+ * (ativos e recebendo solicitações). Em frete fechado a solicitação não pode
+ * mais ser aceita, então não conta. O dono é o do frete (o `companyId` da
+ * solicitação vem do app). Mesma regra no card, no resumo e na lista.
  */
 const PENDING_SOLICITATIONS_FROM = `
   FROM freight_requests freq
   INNER JOIN freight f ON f.id = freq."freightId"
   WHERE f."companyId" = $1
     AND f."isExclude" = false
+    AND f."isActive" = true
+    AND f."openSolicitations" = true
     AND freq.status = 'PENDING'`;
 
 /** Sem resposta há este tempo, a solicitação é urgente (alerta e prioridade ALTA). */
@@ -87,7 +90,7 @@ export class DashboardService {
         lastSaoPauloDays(LEAD_TIME_WINDOW_DAYS, now)[0],
       );
 
-      const [published, active, [routes], pending, [leadTime]] =
+      const [published, active, [routes], pending, [leadTime], [acceptTime]] =
         await Promise.all([
           // Publicados nos últimos 7 dias (dias de São Paulo)
           this.freightRepository.count({
@@ -155,6 +158,26 @@ export class DashboardService {
             `,
             [companyId, leadStart, now],
           ),
+
+          // Tempo até o aceite: solicitação do motorista -> aceite da
+          // transportadora (`respondedAt`), nas solicitações aceitas no período.
+          this.db.query(
+            `
+            SELECT
+              COUNT(*)                                                    AS sample_size,
+              AVG(wait_minutes)                                           AS avg_minutes,
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY wait_minutes)   AS median_minutes
+            FROM (
+              SELECT GREATEST(0, EXTRACT(EPOCH FROM (r."respondedAt" - r."createdAt")) / 60) AS wait_minutes
+                FROM freight_requests r
+                JOIN freight f ON f.id = r."freightId"
+               WHERE f."companyId" = $1
+                 AND r.status IN ('ACCEPTED', 'DRIVER_CONFIRMED_DELIVERY', 'DELIVERY_COMPLETED', 'NOT_CONFIRMED_DELIVERY')
+                 AND r."respondedAt" BETWEEN $2 AND $3
+            ) samples
+            `,
+            [companyId, leadStart, now],
+          ),
         ]);
 
       const sampleSize = Number(leadTime?.sample_size ?? 0);
@@ -200,6 +223,13 @@ export class DashboardService {
           sampleSize,
         },
         leadTimeSampleSize: sampleSize,
+        acceptTime: {
+          description: 'Tempo entre a solicitação do motorista e o aceite da transportadora',
+          windowDays: LEAD_TIME_WINDOW_DAYS,
+          medianMinutes: Number(acceptTime?.sample_size ?? 0) > 0 ? toNumberOrNull(acceptTime?.median_minutes) : null,
+          avgMinutes: Number(acceptTime?.sample_size ?? 0) > 0 ? toNumberOrNull(acceptTime?.avg_minutes) : null,
+          sampleSize: Number(acceptTime?.sample_size ?? 0),
+        },
       };
     } catch (error) {
       throw new HttpException(

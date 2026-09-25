@@ -1,6 +1,9 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
 import { DistanceService } from './distance.service';
 
+/** Só usuários logados: cada chamada consome a cota paga do Google. */
+@UseGuards(JwtAuthGuard)
 @Controller('distance')
 export class DistanceController {
   constructor(private readonly distanceService: DistanceService) {}

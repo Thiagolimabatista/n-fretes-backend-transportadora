@@ -23,12 +23,15 @@ import {
   NotificationCategory,
   NotificationStatus,
 } from '@entities/notifications.entity';
+import {
+  DriverMessage,
+  OPEN_REQUEST_STATUSES,
+  sendDriverMessages,
+} from './driver-notices';
+import { Actor, actorName } from 'src/decorators/get-actor.decorator';
 
-/** Solicitações que a transportadora ainda pode aceitar ou recusar. */
-const OPEN_REQUEST_STATUSES: FreightRequestStatus[] = [
-  FreightRequestStatus.PENDING,
-  FreightRequestStatus.AWAITING_USER_DRIVE_RESPONSE,
-];
+/** Status aceitos no filtro da lista (o portal manda vários separados por vírgula). */
+const REQUEST_STATUS_VALUES = new Set<string>(Object.values(FreightRequestStatus));
 
 /** Solicitações de motorista que está com o frete (rota em andamento). */
 const IN_ROUTE_REQUEST_STATUSES: FreightRequestStatus[] = [
@@ -64,16 +67,6 @@ interface LockedFreight {
   destinyCity: string | null;
   destinyState: string | null;
   destinyCityName: string | null;
-}
-
-/** Aviso ao motorista via SQS, enviado depois do commit. */
-interface DriverMessage {
-  freightRequestId: string;
-  driverId: string;
-  freightId: string;
-  status: string;
-  expiresAt: string;
-  routeId?: string;
 }
 
 /** "Uberlândia/MG": cidade normalizada (coluna gerada) com a UF. */
@@ -181,12 +174,34 @@ export class FreightRequestService {
         'freight_requests.id': params.id,
         'freight_requests.userDriveId': params.userDriveId,
         'freight_requests.freightId': params.freightId,
-        'freight_requests.status': params.status,
       };
 
       Object.entries(filters).forEach(([key, value]) => {
         if (value) queryBuilder.andWhere(`${key} = :${key}`, { [key]: value });
       });
+
+      const statuses = String(params.status ?? '')
+        .split(',')
+        .map((status) => status.trim())
+        .filter((status) => REQUEST_STATUS_VALUES.has(status));
+      if (statuses.length) {
+        queryBuilder.andWhere('freight_requests.status IN (:...statuses)', { statuses });
+      }
+
+      // Busca do portal: nome do motorista, ou CPF/telefone pelos dígitos.
+      const term = String(params.name ?? params.q ?? '').trim();
+      if (term) {
+        const digits = term.replace(/\D/g, '');
+        const byName = 'unaccent(lower(users_drive.name)) LIKE unaccent(lower(:term))';
+        queryBuilder.andWhere(
+          digits.length >= 3
+            ? `(${byName}
+                OR regexp_replace(coalesce(users_drive.cpf, ''), '\\D', '', 'g') LIKE :digits
+                OR regexp_replace(coalesce(users_drive."phoneNumber", ''), '\\D', '', 'g') LIKE :digits)`
+            : byName,
+          { term: `%${term}%`, digits: `%${digits}%` },
+        );
+      }
 
       const [result, total] = await queryBuilder
         .select([
@@ -197,6 +212,8 @@ export class FreightRequestService {
           'freight_requests.status',
           'freight_requests.solicitationsOrder',
           'freight_requests.expiresAt',
+          'freight_requests.respondedAt',
+          'freight_requests.deliveryInformedAt',
           'freight_requests.createdAt',
           'freight_requests.updatedAt',
         ])
@@ -212,7 +229,6 @@ export class FreightRequestService {
           'users_drive.name',
           'users_drive.cnh',
           'users_drive.antt',
-          'users_drive.pushToken',
           'users_drive.city',
           'users_drive.cpf',
           'users_drive.zipcode',
@@ -250,7 +266,7 @@ export class FreightRequestService {
    * motorista em rota; recusa as demais solicitações abertas do frete e
    * grava as notificações. Os avisos SQS saem depois do commit.
    */
-  async acceptFreightRequest(companyId: string, freightRequestId: string) {
+  async acceptFreightRequest(companyId: string, freightRequestId: string, actor?: Actor) {
     const now = new Date();
 
     try {
@@ -339,10 +355,11 @@ export class FreightRequestService {
           }
 
           const routeId = randomUUID();
+          const byName = actor ? await actorName(manager, actor) : null;
 
           await requestRepository.update(
             { id: request.id },
-            { status: FreightRequestStatus.ACCEPTED, expiresAt: null },
+            { status: FreightRequestStatus.ACCEPTED, expiresAt: null, respondedAt: now, respondedByName: byName },
           );
 
           await routeRepository.insert({
@@ -379,7 +396,7 @@ export class FreightRequestService {
           if (others.length) {
             await requestRepository.update(
               { id: In(others.map((other) => other.id)) },
-              { status: FreightRequestStatus.REJECTED, expiresAt: null },
+              { status: FreightRequestStatus.REJECTED, expiresAt: null, respondedAt: now, respondedByName: byName },
             );
           }
 
@@ -482,7 +499,7 @@ export class FreightRequestService {
    * solicitação aceita (confirmação direto do monitoramento) ou com a
    * entrega já informada pelo motorista.
    */
-  async confirmedFreightRequest(companyId: string, freightRequestId: string) {
+  async confirmedFreightRequest(companyId: string, freightRequestId: string, actor?: Actor) {
     const now = new Date();
 
     try {
@@ -519,6 +536,8 @@ export class FreightRequestService {
             lock: { mode: 'pessimistic_write' },
           });
 
+          const byName = actor ? await actorName(manager, actor) : null;
+          let routeId = activeRoute?.id ?? null;
           if (activeRoute) {
             await routeRepository.update(
               { id: activeRoute.id },
@@ -526,8 +545,24 @@ export class FreightRequestService {
                 status: RouteStatus.COMPLETED,
                 isActive: false,
                 completedAt: now,
+                completedByName: byName,
               },
             );
+          } else if (request.userDriveId) {
+            // Aceite antigo sem viagem registrada: grava a viagem concluída para
+            // a entrega contar no painel e no histórico do motorista.
+            routeId = randomUUID();
+            await routeRepository.insert({
+              id: routeId,
+              freightId: freight.id,
+              userDriveId: request.userDriveId,
+              companyId: freight.companyId,
+              status: RouteStatus.COMPLETED,
+              isActive: false,
+              startedAt: request.respondedAt ?? request.updatedAt ?? now,
+              completedAt: now,
+              completedByName: byName,
+            });
           }
 
           await manager.getRepository(FreightRequest).update(
@@ -559,7 +594,7 @@ export class FreightRequestService {
                   'Entrega confirmada. Não esqueça de avaliar este frete.',
                 freightId: freight.id,
                 freightRequestId: request.id,
-                routeId: activeRoute?.id ?? null,
+                routeId,
               },
               iconStyle: IconStyles.FREIGHT_ACCEPTED,
               createdAt: now,
@@ -574,12 +609,12 @@ export class FreightRequestService {
                   freightId: freight.id,
                   status: FreightRequestStatus.DELIVERY_COMPLETED,
                   expiresAt: now.toISOString(),
-                  ...(activeRoute ? { routeId: activeRoute.id } : {}),
+                  ...(routeId ? { routeId } : {}),
                 },
               ]
             : [];
 
-          return { routeId: activeRoute?.id ?? null, messages };
+          return { routeId, messages };
         },
       );
 
@@ -612,7 +647,7 @@ export class FreightRequestService {
    *   não é confirmada, a solicitação volta para ACCEPTED (rota segue em
    *   andamento) e o motorista recebe o aviso de entrega não confirmada.
    */
-  async rejectFreightRequest(companyId: string, freightRequestId: string) {
+  async rejectFreightRequest(companyId: string, freightRequestId: string, actor?: Actor) {
     const now = new Date();
 
     try {
@@ -631,7 +666,12 @@ export class FreightRequestService {
           if (OPEN_REQUEST_STATUSES.includes(request.status)) {
             await requestRepository.update(
               { id: request.id },
-              { status: FreightRequestStatus.REJECTED, expiresAt: null },
+              {
+                status: FreightRequestStatus.REJECTED,
+                expiresAt: null,
+                respondedAt: now,
+                respondedByName: actor ? await actorName(manager, actor) : null,
+              },
             );
 
             if (request.userDriveId) {
@@ -841,16 +881,6 @@ export class FreightRequestService {
    * na fila não desfaz o aceite, só fica registrada no log.
    */
   private async notifyDrivers(messages: DriverMessage[]): Promise<void> {
-    await Promise.all(
-      messages.map(async (message) => {
-        try {
-          await this.sqsService.sendNotificationToDriver(message);
-        } catch (error) {
-          this.logger.warn(
-            `Aviso SQS não enviado (solicitação ${message.freightRequestId}, status ${message.status}): ${error?.message ?? error}`,
-          );
-        }
-      }),
-    );
+    await sendDriverMessages(this.sqsService, this.logger, messages);
   }
 }

@@ -1,11 +1,10 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-
-import { FreightRequest } from '@entities/freight-requests.entity';
+import { SqsModule } from '@components/sqs/sqs.module';
 import { FreightRequestCronService } from './freight-request-croon';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([FreightRequest])],
+  imports: [SqsModule],
   providers: [FreightRequestCronService],
+  exports: [FreightRequestCronService],
 })
 export class FreightRequestCronModule {}

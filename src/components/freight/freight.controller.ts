@@ -21,6 +21,7 @@ import { FreightService } from './freight.service';
 import { CreateFreightDto, UpdateFreightDto } from './dto/freight.dto';
 import { ParamsFreight } from './interface/IFreight';
 import { GetUserId } from 'src/decorators/get-user-decorator';
+import { Actor, GetActor } from 'src/decorators/get-actor.decorator';
 import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
 import { Freight } from '@entities/freight.entity';
 
@@ -32,11 +33,12 @@ export class FreightController {
   @Post('/create')
   async createFreightCompany(
     @Body() createFreightCompany: CreateFreightDto,
-    @GetUserId() userId: string,
+    @GetActor() actor: Actor,
   ): Promise<CreateFreightDto> {
     return this.freightService.createFreightCompany(
       createFreightCompany,
-      userId,
+      actor.companyId,
+      actor,
     );
   }
 
@@ -68,8 +70,11 @@ export class FreightController {
   /********************************************************************************** */
   @Get('/suggested-drivers')
   @UseGuards(JwtAuthGuard)
-  async getSuggestedDrivers(@Query() params: ParamsFreight) {
-    const result = await this.freightService.getSuggestedDrivers(params);
+  async getSuggestedDrivers(
+    @Query() params: ParamsFreight,
+    @GetUserId() companyId: string,
+  ) {
+    const result = await this.freightService.getSuggestedDrivers(params, companyId);
     return result;
   }
 
@@ -78,9 +83,9 @@ export class FreightController {
   @Delete(':id/soft-delete')
   async softDelete(
     @Param('id') id: string,
-    @GetUserId() userId: string,
+    @GetActor() actor: Actor,
   ): Promise<string> {
-    return this.freightService.softDeleteFreight(id, userId);
+    return this.freightService.softDeleteFreight(id, actor.companyId, actor);
   }
 
   /********************************************************************************** */
@@ -93,14 +98,31 @@ export class FreightController {
     return this.freightService.activateFreight(id, userId);
   }
 
+  /** Histórico do frete (card do kanban): o que aconteceu, quando e quem fez. */
+  @UseGuards(JwtAuthGuard)
+  @Get(':id/history')
+  async getFreightHistory(@Param('id') id: string, @GetUserId() companyId: string) {
+    return this.freightService.getFreightHistory(id, companyId);
+  }
+
+  /** Copia um frete da empresa e já publica a cópia. */
+  @UseGuards(JwtAuthGuard)
+  @Post(':id/duplicate')
+  async duplicateFreight(
+    @Param('id') id: string,
+    @GetActor() actor: Actor,
+  ): Promise<Freight> {
+    return this.freightService.duplicateFreight(id, actor.companyId, actor);
+  }
+
   /********************************************************************************** */
   @UseGuards(JwtAuthGuard)
   @Delete(':id/exclude')
   async excludeFreight(
     @Param('id') id: string,
-    @GetUserId() userId: string,
+    @GetActor() actor: Actor,
   ): Promise<string> {
-    return this.freightService.excludeFreight(id, userId);
+    return this.freightService.excludeFreight(id, actor.companyId, actor);
   }
 
   /********************************************************************************** */
@@ -148,14 +170,18 @@ export class FreightController {
 
   @UseGuards(JwtAuthGuard)
   @Get(':id')
-  async getFreightID(@Param('id') id: string): Promise<Freight> {
-    return this.freightService.getFreightById(id);
+  async getFreightID(
+    @Param('id') id: string,
+    @GetUserId() companyId: string,
+  ): Promise<Freight> {
+    return this.freightService.getFreightById(id, companyId);
   }
 
   @UseGuards(JwtAuthGuard)
   @Get(':userId/countFreight')
-  async freightCountCompany(@Param('userId') userId: string) {
-    return this.freightService.freightCountCompany(userId);
+  async freightCountCompany(@GetUserId() companyId: string) {
+    // O id da rota é ignorado: conta sempre os fretes da empresa do token.
+    return this.freightService.freightCountCompany(companyId);
   }
 
   @UseGuards(JwtAuthGuard)

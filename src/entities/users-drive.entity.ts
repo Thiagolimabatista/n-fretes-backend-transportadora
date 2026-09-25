@@ -33,7 +33,8 @@ export class UsersDrive {
   @Column({ nullable: true })
   phoneNumber: string;
 
-  @Column({ nullable: true })
+  /** Só o app do motorista usa: nunca sai nas consultas da transportadora. */
+  @Column({ nullable: true, select: false })
   password: string;
 
   @CreateDateColumn()
@@ -85,7 +86,7 @@ export class UsersDrive {
   @Column({ type: 'timestamp', nullable: true })
   lastAccess: Date;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, select: false })
   accessIp: string;
 
   @Column({ nullable: true })
@@ -94,7 +95,7 @@ export class UsersDrive {
   @Column({ nullable: true })
   cnh: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, select: false })
   pushToken: string;
 
   @Column({ nullable: true, type: 'float', default: 0.0 })

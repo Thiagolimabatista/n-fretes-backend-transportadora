@@ -36,8 +36,9 @@ export interface RouteCoordinates {
   tollPoints: TollPoint[];
 }
 
+/** Rota + pedágio do QualP; uma linha por origem, destino e eixos. */
 @Entity({ schema: 'public', name: 'route_cache' })
-@Index(['originCity', 'destinationCity'])
+@Index('UQ_route_cache_route_axis', ['originCity', 'destinationCity', 'axis'], { unique: true })
 export class RouteCache {
   @PrimaryColumn({ default: () => 'gen_random_uuid()' })
   id: string;
@@ -46,7 +47,11 @@ export class RouteCache {
   originCity: string; 
 
   @Column({ nullable: false })
-  destinationCity: string; 
+  destinationCity: string;
+
+  /** Eixos do veículo usados na tarifa (2 a 9). */
+  @Column({ type: 'int', default: 2 })
+  axis: number;
 
   @Column({ type: 'jsonb', nullable: false })
   tolls: TollData[];

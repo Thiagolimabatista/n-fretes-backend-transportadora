@@ -60,7 +60,8 @@ export class Company {
   @Column({ nullable: true })
   transportCategory: string;
 
-  @Column({ nullable: true })
+  /** Hash da senha: só o login e a troca de senha leem (addSelect). */
+  @Column({ nullable: true, select: false })
   password: string;
 
   @Column({ default: false })
@@ -121,10 +122,10 @@ export class Company {
   @Column({ nullable: true })
   assas_id: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, select: false })
   siimpUsername: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, select: false })
   siimpPassword: string;
 
   @Column({ nullable: true })

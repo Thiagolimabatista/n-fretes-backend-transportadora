@@ -187,7 +187,7 @@ export class CompanyService {
 
       if (updateCompany.userPhotoURL) {
         const bucketName = this.configService.get<string>('AWS_S3_BUCKET_NAME');
-        const key = `user-avatars/${company.nameFantasy}-user-${userId}.jpg`;
+        const key = `user-avatars/${userId}/foto`;
 
         userPhotoURL = await this.awsService.uploadAvatar(
           bucketName,
@@ -197,7 +197,7 @@ export class CompanyService {
       }
       if (updateCompany.photoUrl) {
         const bucketName = this.configService.get<string>('AWS_S3_BUCKET_NAME');
-        const key = `avatars/${company.nameFantasy}-${userId}.jpg`;
+        const key = `avatars/${userId}/logo`;
 
         photoUrl = await this.awsService.uploadAvatar(
           bucketName,

@@ -1,19 +1,78 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { FreightRoutes, RouteStatus } from '@entities/freight-routes.entity';
 import { ParamsFreightRoute } from './interface/IFreightRoute';
 import { UsersDrive } from '@entities/users-drive.entity';
 import { UsersLocation } from '@entities/users-location.entity';
 import { Freight } from '@entities/freight.entity';
-import { FreightRequestStatus } from '@entities/freight-requests.entity';
+import { FreightRequest, FreightRequestStatus } from '@entities/freight-requests.entity';
+import { FreightRequestService } from '@components/freight-request/freight-request.service';
+import {
+  DriverMessage,
+  OPEN_REQUEST_STATUSES,
+  sendDriverMessages,
+} from '@components/freight-request/driver-notices';
+import { SQSService } from '@components/sqs/sqs.service';
+import { Actor, actorName } from 'src/decorators/get-actor.decorator';
+import { freightExpiry, isPickupPast } from 'src/utils/freight-dates';
+import {
+  EntityType,
+  IconStyles,
+  Notification,
+  NotificationCategory,
+  NotificationStatus,
+} from '@entities/notifications.entity';
 import { syncDriverOnRoute } from './driver-on-route';
 import {
   LastLocation,
   RouteTimeline,
+  TimelineCity,
   TimelineEvent,
   TimelinePoint,
+  TimelineProgress,
 } from './interface/IRouteTracking';
+import { distanceKm as distanceKmBetween, nearestCity } from 'src/utils/nearest-city';
+import { toDayKey } from 'src/utils/freight-dates';
+
+/** Estrada é mais longa que a linha reta: fator médio usado na previsão. */
+const ROAD_FACTOR = 1.2;
+/** Velocidade média considerada na previsão (limites e padrão), em km/h. */
+const MIN_SPEED = 35;
+const MAX_SPEED = 75;
+const DEFAULT_SPEED = 55;
+
+/**
+ * Cidades por onde o motorista passou: cada ponto vira a sede de município
+ * mais próxima (até 25 km); pontos seguidos na mesma cidade viram uma
+ * passagem com hora de chegada e de saída.
+ */
+function citiesAlong(points: TimelinePoint[]): TimelineCity[] {
+  const cities: TimelineCity[] = [];
+  for (const point of points) {
+    const city = nearestCity(point.latitude, point.longitude);
+    if (!city) continue;
+    const last = cities[cities.length - 1];
+    if (last && last.name === city.name && last.state === city.state) {
+      last.leftAt = point.recordedAt;
+    } else {
+      cities.push({
+        name: city.name,
+        state: city.state,
+        arrivedAt: point.recordedAt,
+        leftAt: point.recordedAt,
+        current: false,
+      });
+    }
+  }
+  const lastPoint = points[points.length - 1];
+  const lastCity = lastPoint ? nearestCity(lastPoint.latitude, lastPoint.longitude) : null;
+  if (lastCity && cities.length) {
+    const tail = cities[cities.length - 1];
+    tail.current = tail.name === lastCity.name && tail.state === lastCity.state;
+  }
+  return cities;
+}
 
 /** Máximo de pontos devolvidos na linha do tempo (amostragem uniforme). */
 const TIMELINE_MAX_POINTS = 500;
@@ -80,6 +139,8 @@ function sampleEvenly<T>(items: T[], max: number): T[] {
 
 @Injectable()
 export class FreightRouteService {
+  private readonly logger = new Logger(FreightRouteService.name);
+
   constructor(
     @InjectRepository(FreightRoutes)
     private readonly freightRoutesRepository: Repository<FreightRoutes>,
@@ -87,99 +148,58 @@ export class FreightRouteService {
     private readonly userDriveRepository: Repository<UsersDrive>,
     @InjectRepository(Freight)
     private readonly freightRepository: Repository<Freight>,
+    private readonly freightRequestService: FreightRequestService,
+    private readonly sqsService: SQSService,
   ) {}
 
-  async createRouteInProgress(
-    companyId: string,
-    freightId: string,
-    userDriveId: string,
-  ) {
-    try {
-      if (!freightId || !userDriveId) {
-        throw new HttpException(
-          'freightId e userDriveId são obrigatórios',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
+  /**
+   * Transportadora escolhe o motorista direto no monitoramento. Passa pelo
+   * mesmo aceite do fluxo normal: usa a solicitação aberta do motorista (ou
+   * cria uma), trava frete e motorista, cria a viagem, fecha o frete, recusa
+   * os demais e avisa todo mundo. Assim a entrega pode ser confirmada depois.
+   */
+  async createRouteInProgress(companyId: string, freightId: string, userDriveId: string, actor?: Actor) {
+    if (!freightId || !userDriveId) {
+      throw new HttpException('Escolha o frete e o motorista.', HttpStatus.BAD_REQUEST);
+    }
+    const freight = await this.freightRepository.findOne({
+      where: { id: freightId, companyId, isExclude: false },
+      select: ['id', 'companyId'],
+    });
+    if (!freight) {
+      throw new HttpException('Frete não encontrado', HttpStatus.NOT_FOUND);
+    }
+    const driver = await this.userDriveRepository.findOne({ where: { id: userDriveId }, select: ['id'] });
+    if (!driver) {
+      throw new HttpException('Motorista não encontrado', HttpStatus.NOT_FOUND);
+    }
 
-      const freight = await this.freightRepository.findOne({
-        where: { id: freightId, companyId },
-      });
-
-      if (!freight) {
-        throw new HttpException('Frete não encontrado', HttpStatus.NOT_FOUND);
-      }
-
-      const userDrive = await this.userDriveRepository.findOne({
-        where: { id: userDriveId },
-      });
-
-      if (!userDrive) {
-        throw new HttpException('Motorista não encontrado', HttpStatus.NOT_FOUND);
-      }
-
-      const routeForDriver = await this.freightRoutesRepository.findOne({
-        where: {
-          userDriveId,
-          status: RouteStatus.IN_PROGRESS,
-          isActive: true,
-        },
-      });
-
-      if (routeForDriver) {
-        throw new HttpException(
-          'Motorista já possui rota em progresso',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-
-      const routeForFreight = await this.freightRoutesRepository.findOne({
-        where: {
-          freightId,
-          status: RouteStatus.IN_PROGRESS,
-          isActive: true,
-        },
-      });
-
-      if (routeForFreight) {
-        throw new HttpException(
-          'Este frete já possui rota em progresso',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-
-      const newRoute = this.freightRoutesRepository.create({
-        companyId,
-        freightId,
-        userDriveId,
-        status: RouteStatus.IN_PROGRESS,
-        isActive: true,
-      });
-
-      const savedRoute = await this.freightRoutesRepository.save(newRoute);
-
-      userDrive.isOnRoute = true;
-      await this.userDriveRepository.save(userDrive);
-
-      freight.isActive = false;
-      freight.openSolicitations = false;
-      await this.freightRepository.save(freight);
-
-      return {
-        success: true,
-        message: 'Rota criada com sucesso em progresso.',
-        route: savedRoute,
-      };
-    } catch (error) {
-      if (error instanceof HttpException) {
-        throw error;
-      }
-
-      console.error('Erro ao criar rota em progresso:', error);
-      throw new HttpException(
-        'Erro ao criar rota em progresso',
-        HttpStatus.INTERNAL_SERVER_ERROR,
+    const requests = this.freightRepository.manager.getRepository(FreightRequest);
+    let request = await requests.findOne({
+      where: { freightId, userDriveId, status: In(OPEN_REQUEST_STATUSES) },
+      select: ['id'],
+    });
+    let createdHere = false;
+    if (!request) {
+      request = await requests.save(
+        requests.create({ freightId, userDriveId, companyId, status: FreightRequestStatus.PENDING }),
       );
+      createdHere = true;
+    }
+
+    try {
+      const accepted = await this.freightRequestService.acceptFreightRequest(
+        companyId,
+        request.id,
+        actor ?? { companyId, contactId: null },
+      );
+      const route = await this.freightRoutesRepository.findOne({ where: { id: accepted.routeId } });
+      return { success: true, message: 'Motorista escolhido. Ele foi avisado para iniciar a rota.', route };
+    } catch (error) {
+      // Aceite recusado (frete fechado, motorista em outra viagem...): não deixa
+      // a solicitação criada aqui pendurada.
+      if (createdHere) await requests.delete({ id: request.id }).catch(() => undefined);
+      throw error;
     }
   }
 
@@ -220,7 +240,6 @@ export class FreightRouteService {
           'users_drive.name',
           'users_drive.cnh',
           'users_drive.antt',
-          'users_drive.pushToken',
           'users_drive.city',
           'users_drive.cpf',
           'users_drive.similiary',
@@ -316,7 +335,6 @@ export class FreightRouteService {
           'users_drive.name',
           'users_drive.cnh',
           'users_drive.antt',
-          'users_drive.pushToken',
           'users_drive.city',
           'users_drive.cpf',
           'users_drive.similiary',
@@ -384,96 +402,173 @@ export class FreightRouteService {
    * Encerra a rota da empresa: COMPLETED grava `completedAt`; CANCEL deixa
    * `completedAt` nulo (a coluna só vale para rota concluída).
    */
-  async updateStatus(companyId: string, routeId: string, status: RouteStatus) {
+  /**
+   * Conclusão ou cancelamento pela transportadora (PATCH :id/status).
+   * Concluir usa a mesma confirmação de entrega do fluxo normal (solicitação,
+   * viagem e aviso ao motorista). Cancelar é o mesmo que "Cancelar viagem".
+   */
+  async updateStatus(companyId: string, routeId: string, status: RouteStatus, actor?: Actor) {
     if (![RouteStatus.CANCELED, RouteStatus.COMPLETED].includes(status)) {
       throw new HttpException('Status inválido.', HttpStatus.BAD_REQUEST);
     }
-
-    try {
-      await this.freightRoutesRepository.manager.transaction(
-        async (manager) => {
-          const routeRepository = manager.getRepository(FreightRoutes);
-          const freightRoute = await routeRepository.findOne({
-            where: { id: routeId, companyId },
-            select: ['id', 'userDriveId'],
-            lock: { mode: 'pessimistic_write' },
-          });
-
-          if (!freightRoute) {
-            throw new HttpException(
-              'Rota não encontrada.',
-              HttpStatus.NOT_FOUND,
-            );
-          }
-
-          await routeRepository.update(
-            { id: freightRoute.id },
-            {
-              status,
-              isActive: false,
-              completedAt:
-                status === RouteStatus.COMPLETED ? new Date() : null,
-            },
-          );
-
-          if (freightRoute.userDriveId) {
-            await syncDriverOnRoute(manager, freightRoute.userDriveId);
-          }
-        },
-      );
-
-      return {
-        message:
-          status === RouteStatus.COMPLETED
-            ? 'Rota concluída com sucesso!'
-            : 'Rota cancelada com sucesso!',
-        result: true,
-      };
-    } catch (error) {
-      if (error instanceof HttpException) throw error;
-
-      console.error('Erro ao atualizar status do frete:', error);
-      throw new HttpException(
-        'Erro ao atualizar status do frete',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+    const who: Actor = actor ?? { companyId, contactId: null };
+    if (status === RouteStatus.CANCELED) {
+      return this.cancelRouteByCompany(routeId, who);
     }
+
+    const route = await this.freightRoutesRepository.findOne({
+      where: { id: routeId, companyId },
+      select: ['id', 'freightId', 'userDriveId', 'status'],
+    });
+    if (!route) {
+      throw new HttpException('Rota não encontrada.', HttpStatus.NOT_FOUND);
+    }
+    const request = await this.freightRoutesRepository.manager.getRepository(FreightRequest).findOne({
+      where: {
+        freightId: route.freightId,
+        userDriveId: route.userDriveId,
+        status: In([
+          FreightRequestStatus.ACCEPTED,
+          FreightRequestStatus.DRIVER_CONFIRMED_DELIVERY,
+          FreightRequestStatus.NOT_CONFIRMED_DELIVERY,
+        ]),
+      },
+      select: ['id'],
+    });
+    if (request) {
+      await this.freightRequestService.confirmedFreightRequest(companyId, request.id, who);
+      return { message: 'Rota concluída com sucesso!', result: true };
+    }
+
+    // Rota sem solicitação (dados antigos): conclui só a viagem.
+    await this.freightRoutesRepository.manager.transaction(async (manager) => {
+      const byName = await actorName(manager, who);
+      await manager.getRepository(FreightRoutes).update(
+        { id: route.id, companyId },
+        { status: RouteStatus.COMPLETED, isActive: false, completedAt: new Date(), completedByName: byName },
+      );
+      if (route.userDriveId) await syncDriverOnRoute(manager, route.userDriveId);
+    });
+    return { message: 'Rota concluída com sucesso!', result: true };
   }
 
-  async hardDeleteRoute(routeId: string, companyId: string) {
-    try {
-      const freightRoute = await this.freightRoutesRepository.findOne({
-        where: { id: routeId, companyId },
-      });
-
-      if (!freightRoute) {
-        throw new HttpException('Rota não encontrada', HttpStatus.NOT_FOUND);
+  /**
+   * "Cancelar viagem" pela transportadora: a viagem fica registrada como
+   * cancelada (o histórico não some), a solicitação do motorista é encerrada,
+   * o motorista é avisado e o frete volta a ser publicado se a coleta ainda
+   * não passou. Viagem concluída não pode ser cancelada.
+   */
+  async cancelRouteByCompany(routeId: string, actor: Actor) {
+    const now = new Date();
+    const outcome = await this.freightRoutesRepository.manager.transaction(async (manager) => {
+      const [route] = await manager.query(
+        `SELECT "id", "freightId", "userDriveId", "status" FROM "freight_routes"
+          WHERE "id" = $1 AND "companyId" = $2 FOR UPDATE`,
+        [routeId, actor.companyId],
+      );
+      if (!route) {
+        throw new HttpException('Rota não encontrada.', HttpStatus.NOT_FOUND);
       }
-
-      await this.freightRoutesRepository.delete({ id: routeId, companyId });
-
-      if (freightRoute.userDriveId) {
-        await syncDriverOnRoute(
-          this.freightRoutesRepository.manager,
-          freightRoute.userDriveId,
+      if (route.status !== RouteStatus.IN_PROGRESS) {
+        throw new HttpException(
+          {
+            message: 'Só dá para cancelar viagem em andamento. Viagem concluída fica no histórico.',
+            errorCode: 'ROUTE_NOT_IN_PROGRESS',
+          },
+          HttpStatus.CONFLICT,
         );
       }
-
-      return {
-        success: true,
-        message: 'Rota excluída permanentemente com sucesso.',
-      };
-    } catch (error) {
-      if (error instanceof HttpException) {
-        throw error;
-      }
-
-      console.error('Erro ao excluir rota permanentemente:', error);
-      throw new HttpException(
-        'Erro ao excluir rota permanentemente',
-        HttpStatus.INTERNAL_SERVER_ERROR,
+      const [freight] = await manager.query(
+        `SELECT "id", "dateOrigin", "isExclude",
+                COALESCE(NULLIF("originCityName", ''), "originCity") AS "origin", "originState",
+                COALESCE(NULLIF("destinyCityName", ''), "destinyCity") AS "destiny", "destinyState"
+           FROM "freight" WHERE "id" = $1 FOR UPDATE`,
+        [route.freightId],
       );
-    }
+      const byName = await actorName(manager, actor);
+
+      await manager.query(
+        `UPDATE "freight_routes"
+            SET "status" = 'CANCEL', "isActive" = false, "completedAt" = $2, "completedByName" = $3
+          WHERE "id" = $1`,
+        [route.id, now, byName],
+      );
+      const [requests] = await manager.query(
+        `UPDATE "freight_requests"
+            SET "status" = 'REJECTED', "respondedAt" = $3, "respondedByName" = $4, "updatedAt" = $3, "expiresAt" = NULL
+          WHERE "freightId" = $1 AND "userDriveId" = $2
+            AND "status" IN ('ACCEPTED', 'DRIVER_CONFIRMED_DELIVERY', 'NOT_CONFIRMED_DELIVERY')
+        RETURNING "id"`,
+        [route.freightId, route.userDriveId, now, byName],
+      );
+
+      const reopen = !!freight && !freight.isExclude && !isPickupPast(freight.dateOrigin, now);
+      if (reopen) {
+        await manager.query(
+          `UPDATE "freight" SET "isActive" = true, "openSolicitations" = true, "expiresAt" = $2, "updatedAt" = $3
+            WHERE "id" = $1`,
+          [freight.id, freightExpiry(freight.dateOrigin, now), now],
+        );
+      }
+      if (route.userDriveId) await syncDriverOnRoute(manager, route.userDriveId);
+
+      const where = freight
+        ? `de ${freight.origin}/${freight.originState} para ${freight.destiny}/${freight.destinyState}`
+        : '';
+      const [company] = await manager.query(
+        `SELECT COALESCE(NULLIF("nameFantasy", ''), "name") AS "name" FROM "company" WHERE "id" = $1`,
+        [actor.companyId],
+      );
+      const title = 'Viagem cancelada pela transportadora';
+      const body = `A transportadora ${company?.name ?? ''} cancelou a viagem ${where}.`.replace(/\s+\./, '.');
+      if (route.userDriveId) {
+        const notifications = manager.getRepository(Notification);
+        await notifications.insert(
+          notifications.create({
+            title,
+            message: body,
+            senderType: EntityType.COMPANY,
+            senderId: actor.companyId,
+            recipientType: EntityType.USER,
+            recipientId: route.userDriveId,
+            category: NotificationCategory.FREIGHT,
+            status: NotificationStatus.UNREAD,
+            payload: { freightId: route.freightId, routeId: route.id, reason: 'route_canceled' },
+            iconStyle: IconStyles.FREIGHT_RECUSED,
+            createdAt: now,
+          }),
+        );
+      }
+      const messages: DriverMessage[] = route.userDriveId
+        ? [
+            {
+              freightRequestId: requests?.[0]?.id ?? '',
+              driverId: route.userDriveId,
+              freightId: route.freightId,
+              status: FreightRequestStatus.REJECTED,
+              expiresAt: '',
+              routeId: route.id,
+              title,
+              body,
+              screen: 'MyFreights',
+            },
+          ]
+        : [];
+      return { reopen, messages };
+    });
+
+    await sendDriverMessages(this.sqsService, this.logger, outcome.messages);
+    return {
+      success: true,
+      message: outcome.reopen
+        ? 'Viagem cancelada. O motorista foi avisado e o frete voltou a ser publicado.'
+        : 'Viagem cancelada. O motorista foi avisado.',
+    };
+  }
+
+  /** Mantido por compatibilidade (portal antigo): agora cancela a viagem, não apaga. */
+  async hardDeleteRoute(routeId: string, companyId: string, actor?: Actor) {
+    return this.cancelRouteByCompany(routeId, actor ?? { companyId, contactId: null });
   }
 
   async getStaticsUserRoute(userId: string) {
@@ -587,7 +682,9 @@ export class FreightRouteService {
       const [route] = await this.freightRoutesRepository.query(
         `SELECT r."id", r."status", r."startedAt", r."completedAt",
                 r."freightId", r."userDriveId",
-                f."createdAt" AS "freightCreatedAt",
+                f."createdAt" AS "freightCreatedAt", f."createdByName",
+                f."dateReceiver", f."destinyLatitude", f."destinyLongitude",
+                r."completedByName",
                 COALESCE(f."originCityName", f."originCity") AS "originCity",
                 f."originState",
                 COALESCE(f."destinyCityName", f."destinyCity") AS "destinyCity",
@@ -607,12 +704,19 @@ export class FreightRouteService {
       }
 
       const [requests, rows]: [
-        Array<{ status: FreightRequestStatus; createdAt: Date; updatedAt: Date }>,
+        Array<{
+          status: FreightRequestStatus;
+          createdAt: Date;
+          updatedAt: Date;
+          respondedAt: Date | null;
+          deliveryInformedAt: Date | null;
+          respondedByName: string | null;
+        }>,
         Array<Record<string, unknown>>,
       ] = await Promise.all([
         route.freightId && route.userDriveId
           ? this.freightRoutesRepository.query(
-              `SELECT "status", "createdAt", "updatedAt"
+              `SELECT "status", "createdAt", "updatedAt", "respondedAt", "deliveryInformedAt", "respondedByName"
                  FROM "freight_requests"
                 WHERE "freightId" = $1
                   AND "userDriveId" = $2
@@ -635,33 +739,52 @@ export class FreightRouteService {
         type: TimelineEvent['type'],
         label: string,
         at: unknown,
+        by: string | null = null,
       ) => {
         const iso = toIso(at);
-        if (iso) events.push({ type, label, at: iso });
+        if (iso) events.push({ type, label, at: iso, by });
       };
       const requestIn = (status: FreightRequestStatus) =>
         requests.find((request) => request.status === status);
 
-      addEvent('PUBLISHED', 'Frete publicado', route.freightCreatedAt);
+      addEvent('PUBLISHED', 'Frete publicado', route.freightCreatedAt, route.createdByName ?? null);
       addEvent(
         'REQUESTED',
         'Motorista solicitou o frete',
         requests[0]?.createdAt,
+        route.driverName ?? null,
+      );
+      // Datas gravadas (respondedAt/deliveryInformedAt) valem mesmo depois que o
+      // status muda; antes o evento sumia quando a entrega era confirmada.
+      const accepted = requests.find((request) =>
+        ROUTE_REQUEST_STATUSES.includes(request.status) &&
+        request.status !== FreightRequestStatus.CANCELED_BY_DRIVER,
       );
       addEvent(
         'ACCEPTED',
         'Transportadora aceitou o motorista',
-        route.startedAt,
+        accepted?.respondedAt ?? route.startedAt,
+        accepted?.respondedByName ?? null,
       );
-      addEvent('STARTED', 'Rota iniciada', route.startedAt);
+      addEvent(
+        'STARTED',
+        'Rota iniciada',
+        rows.length ? rows[0].recordedAt : route.startedAt,
+        route.driverName ?? null,
+      );
+      const informedAt = requests
+        .map((request) => request.deliveryInformedAt)
+        .filter(Boolean)
+        .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
       addEvent(
         'DRIVER_CONFIRMED',
         'Motorista informou a entrega',
-        requestIn(FreightRequestStatus.DRIVER_CONFIRMED_DELIVERY)?.updatedAt,
+        informedAt ?? requestIn(FreightRequestStatus.DRIVER_CONFIRMED_DELIVERY)?.updatedAt,
+        route.driverName ?? null,
       );
 
       if (route.status === RouteStatus.COMPLETED) {
-        addEvent('COMPLETED', 'Entrega confirmada', route.completedAt);
+        addEvent('COMPLETED', 'Entrega confirmada', route.completedAt, route.completedByName ?? null);
       }
 
       if (route.status === RouteStatus.CANCELED) {
@@ -670,8 +793,9 @@ export class FreightRouteService {
         );
         addEvent(
           'CANCELED',
-          canceledByDriver ? 'Motorista desistiu do frete' : 'Rota cancelada',
+          canceledByDriver ? 'Motorista desistiu do frete' : 'Viagem cancelada pela transportadora',
           canceledByDriver?.updatedAt ?? route.completedAt,
+          canceledByDriver ? route.driverName ?? null : route.completedByName ?? null,
         );
       }
 
@@ -690,6 +814,50 @@ export class FreightRouteService {
           total += haversineKm(allPoints[i - 1], allPoints[i]);
         }
         distanceKm = Math.round(total * 100) / 100;
+      }
+
+      const cities = citiesAlong(allPoints);
+
+      let progress: TimelineProgress | null = null;
+      const destination = {
+        latitude: Number(route.destinyLatitude),
+        longitude: Number(route.destinyLongitude),
+      };
+      const lastPoint = allPoints[allPoints.length - 1];
+      if (
+        route.status === RouteStatus.IN_PROGRESS &&
+        lastPoint &&
+        Number.isFinite(destination.latitude) &&
+        Number.isFinite(destination.longitude) &&
+        route.destinyLatitude !== null
+      ) {
+        const traveledKm = distanceKm ?? 0;
+        const remainingKm = Math.round(distanceKmBetween(lastPoint, destination) * ROAD_FACTOR);
+        const firstAt = new Date(allPoints[0].recordedAt ?? 0).getTime();
+        const lastAt = new Date(lastPoint.recordedAt ?? 0).getTime();
+        const hours = (lastAt - firstAt) / 3_600_000;
+        const measured = hours >= 1 && traveledKm >= 20 ? traveledKm / hours : DEFAULT_SPEED;
+        const avgSpeedKmh = Math.round(Math.min(MAX_SPEED, Math.max(MIN_SPEED, measured)));
+        // Sem sinal há mais de 30 min, a previsão conta a partir de agora
+        // (senão mostraria um horário que já passou).
+        const travelMs = (remainingKm / avgSpeedKmh) * 3_600_000;
+        const stale = Date.now() - lastAt > 30 * 60_000;
+        const etaAt = lastAt ? new Date((stale ? Date.now() : lastAt) + travelMs) : null;
+        const dueDay = toDayKey(route.dateReceiver);
+        const dueAt = dueDay ? new Date(`${dueDay}T23:59:59.999-03:00`) : null;
+        progress = {
+          traveledKm: Math.round(traveledKm),
+          remainingKm,
+          progressPercent:
+            traveledKm + remainingKm > 0
+              ? Math.round((traveledKm / (traveledKm + remainingKm)) * 100)
+              : null,
+          avgSpeedKmh,
+          etaAt: etaAt ? etaAt.toISOString() : null,
+          dueAt: dueAt ? dueAt.toISOString() : null,
+          late: !!(etaAt && dueAt && etaAt > dueAt),
+          lastSeenMinutesAgo: lastAt ? Math.max(0, Math.round((Date.now() - lastAt) / 60_000)) : null,
+        };
       }
 
       return {
@@ -713,6 +881,8 @@ export class FreightRouteService {
         },
         events,
         points: sampleEvenly(allPoints, TIMELINE_MAX_POINTS),
+        cities,
+        progress,
         summary: {
           pointsCount: allPoints.length,
           lastSeenAt: allPoints.length

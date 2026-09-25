@@ -54,17 +54,6 @@ export class CompanySearchService {
     private readonly companyRepository: Repository<Company>,
   ) {}
 
-  async findByCnpj(cnpjInput: string): Promise<Omit<Company, 'password'>> {
-    const norm = cnpjInput.replace(/\D/g, '');
-    const companies = await this.companyRepository.find();
-    const company = companies.find((c) => c.cnpj?.replace(/\D/g, '') === norm);
-    if (!company) {
-      throw new NotFoundException('Transportadora não encontrada');
-    }
-    const { password, ...rest } = company;
-    return rest;
-  }
-
   async getCnpjData(cnpjInput: string): Promise<ReceitaCnpjData> {
     const cnpj = cnpjInput.replace(/\D/g, '');
 

@@ -22,5 +22,6 @@ import { Notification } from '@entities/notifications.entity';
   ],
   controllers: [FreightRequestController],
   providers: [FreightRequestService, PaginationService, SQSService],
+  exports: [FreightRequestService],
 })
 export class FreightRequestModule {}

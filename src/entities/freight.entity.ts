@@ -220,4 +220,12 @@ export class Freight {
 
   @Column({ type: 'timestamp', nullable: true })
   expiresAt: Date;
+
+  /** Quem publicou: membro da equipe (null = conta principal da empresa). */
+  @Column({ nullable: true })
+  createdByContactId: string;
+
+  /** Nome de quem publicou, gravado na publicação. */
+  @Column({ nullable: true })
+  createdByName: string;
 }

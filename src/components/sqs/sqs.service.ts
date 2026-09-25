@@ -26,6 +26,10 @@ export class SQSService {
     expiresAt: string;
     /** Rota criada no aceite (status ACCEPTED), para o app abrir o frete ativo. */
     routeId?: string;
+    /** Texto pronto do push (expiração, frete encerrado ou removido). */
+    title?: string;
+    body?: string;
+    screen?: string;
   }) {
     const params = {
       QueueUrl: this.queueUrlFreightSharing,

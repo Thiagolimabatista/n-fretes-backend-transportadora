@@ -83,6 +83,10 @@ export class FreightRoutes {
   @Column({ type: 'timestamp', nullable: true })
   completedAt: Date | null;
 
+  /** Quem confirmou a entrega ("Sistema" na baixa automática). */
+  @Column({ type: 'varchar', nullable: true })
+  completedByName: string | null;
+
   @OneToMany(() => FreightRouteLocations, (location) => location.route)
   locations: FreightRouteLocations[];
 }

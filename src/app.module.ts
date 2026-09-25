@@ -28,6 +28,8 @@ import { DistanceModule } from '@components/distance/distance.module';
 import { DownloadTrackingModule } from '@components/download-tracking/download-tracking.module';
 import { RouteCacheModule } from '@components/route-cache/route-cache.module';
 import { GeocodingModule } from '@components/geocoding/geocoding.module';
+import { RealtimeModule } from '@components/realtime/realtime.module';
+import { WebPushModule } from '@components/web-push/web-push.module';
 
 @Module({
   imports: [
@@ -68,6 +70,8 @@ import { GeocodingModule } from '@components/geocoding/geocoding.module';
     DownloadTrackingModule,
     RouteCacheModule,
     GeocodingModule,
+    RealtimeModule,
+    WebPushModule,
   ],
   controllers: [AppController],
   providers: [AppService],

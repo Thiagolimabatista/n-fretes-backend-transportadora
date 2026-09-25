@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
 import { GetUserId } from 'src/decorators/get-user-decorator';
+import { Actor, GetActor } from 'src/decorators/get-actor.decorator';
 import { FreightRouteService } from './freight-route.service';
 import { ParamsFreightRoute } from './interface/IFreightRoute';
 import { RouteStatus } from '@entities/freight-routes.entity';
@@ -22,14 +23,15 @@ export class FreightRouteController {
   @Post('create')
   @UseGuards(JwtAuthGuard)
   async createRouteInProgress(
-    @GetUserId() companyId: string,
+    @GetActor() actor: Actor,
     @Body('freightId') freightId: string,
     @Body('userDriveId') userDriveId: string,
   ) {
     return this.freightRouteService.createRouteInProgress(
-      companyId,
+      actor.companyId,
       freightId,
       userDriveId,
+      actor,
     );
   }
 
@@ -51,11 +53,18 @@ export class FreightRouteController {
   @Patch(':id/status')
   @UseGuards(JwtAuthGuard)
   async updateStatus(
-    @GetUserId() companyId: string,
+    @GetActor() actor: Actor,
     @Param('id') routeId: string,
     @Body('status') status: RouteStatus,
   ) {
-    return this.freightRouteService.updateStatus(companyId, routeId, status);
+    return this.freightRouteService.updateStatus(actor.companyId, routeId, status, actor);
+  }
+
+  /** Cancelar viagem em andamento (o motorista é avisado; o histórico fica). */
+  @Patch(':id/cancel')
+  @UseGuards(JwtAuthGuard)
+  async cancelRoute(@GetActor() actor: Actor, @Param('id') routeId: string) {
+    return this.freightRouteService.cancelRouteByCompany(routeId, actor);
   }
 
   /** Linha do tempo da rota: eventos, pontos do rastreamento e resumo. */
@@ -70,11 +79,8 @@ export class FreightRouteController {
 
   @Delete(':id/hard-delete')
   @UseGuards(JwtAuthGuard)
-  async hardDeleteRoute(
-    @Param('id') routeId: string,
-    @GetUserId() companyId: string,
-  ) {
-    return this.freightRouteService.hardDeleteRoute(routeId, companyId);
+  async hardDeleteRoute(@Param('id') routeId: string, @GetActor() actor: Actor) {
+    return this.freightRouteService.hardDeleteRoute(routeId, actor.companyId, actor);
   }
 
   @Get(':userId/statics')

@@ -51,6 +51,15 @@ export class AwsService {
     return uploadResult.Location;
   }
 
+  /** Apaga arquivos do bucket (até 1000 por chamada; chaves vazias são ignoradas). */
+  async deleteObjects(bucketName: string, keys: string[]): Promise<void> {
+    const objects = keys.filter(Boolean).map((Key) => ({ Key }));
+    if (!bucketName || !objects.length) return;
+    await this.s3
+      .deleteObjects({ Bucket: bucketName, Delete: { Objects: objects, Quiet: true } })
+      .promise();
+  }
+
   async compareFaces(sourceImage: Buffer, targetImage: Buffer) {
     const params = {
       SourceImage: { Bytes: sourceImage },
@@ -62,20 +71,28 @@ export class AwsService {
     return result.FaceMatches;
   }
 
+  /**
+   * Sobe uma imagem em data URL. `keyPrefix` vai sem extensão: o nome ganha
+   * data/hora e a extensão do tipo real da imagem, então cada troca gera uma
+   * URL nova (sem ficar presa em cache de navegador ou CDN).
+   */
   async uploadAvatar(
     bucketName: string,
-    key: string,
+    keyPrefix: string,
     base64String: string,
   ): Promise<string> {
-    const base64Data = base64String.replace(/^data:image\/\w+;base64,/, '');
+    const mime = /^data:(image\/[\w.+-]+);base64,/.exec(base64String)?.[1] ?? 'image/jpeg';
+    const ext = { 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' }[mime] ?? 'jpg';
+    const base64Data = base64String.replace(/^data:image\/[\w.+-]+;base64,/, '');
 
     const buffer = Buffer.from(base64Data, 'base64');
 
     const params = {
       Bucket: bucketName,
-      Key: key,
+      Key: `${keyPrefix}-${Date.now()}.${ext}`,
       Body: buffer,
-      ContentType: 'image/jpeg',
+      ContentType: mime,
+      CacheControl: 'public, max-age=31536000, immutable',
     };
 
     const uploadResult = await this.s3.upload(params).promise();

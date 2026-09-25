@@ -18,10 +18,11 @@ export class CalculateRouteDto {
   @IsNotEmpty()
   destinationCity: string;
 
+  /** Eixos do veículo (2 a 9); padrão 2. */
   @IsOptional()
   @Type(() => Number)
   @IsInt()
-  @Min(1)
+  @Min(2)
   @Max(9)
   axis?: number;
 

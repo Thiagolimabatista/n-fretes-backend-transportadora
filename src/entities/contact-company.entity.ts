@@ -51,6 +51,7 @@ export class ContactCompany {
   @Column({ nullable: true })
   cpf: string;
 
-  @Column({ nullable: true })
+  /** Hash da senha do membro da equipe: só o login lê (addSelect). */
+  @Column({ nullable: true, select: false })
   password: string;
 }

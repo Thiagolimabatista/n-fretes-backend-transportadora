@@ -11,12 +11,14 @@ import { UsersDrive } from '@entities/users-drive.entity';
 import { DistanceModule } from '@components/distance/distance.module';
 import { FreightDocument } from '@entities/freight-documents.entity';
 import { AwsService } from '@components/aws/aws.service';
+import { SqsModule } from '@components/sqs/sqs.module';
 
 @Module({
   imports: [
     ConfigModule,
     TypeOrmModule.forFeature([Freight, Company, UsersDrive, FreightDocument]),
     DistanceModule,
+    SqsModule,
   ],
   exports: [TypeOrmModule],
   controllers: [FreightController],

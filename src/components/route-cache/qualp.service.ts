@@ -187,8 +187,9 @@ export class QualpService {
 
     const data = response.data;
 
-    if (!data || !data.pedagios) {
-      throw new Error('Resposta da QUALP API não contém dados de pedágios');
+    if (!data || !Array.isArray(data.pedagios)) {
+      this.logger.error(`QUALP sem pedágios na resposta (${params.locations.join(' -> ')})`);
+      throw new HttpException(TOLL_UNAVAILABLE_MESSAGE, HttpStatus.SERVICE_UNAVAILABLE);
     }
 
     const axisStr = axis.toString();
@@ -237,9 +238,8 @@ export class QualpService {
   private getApiKey(): string {
     const key = process.env.QUALP_API_KEY ?? '';
     if (!key) {
-      throw new Error(
-        'QUALP_API_KEY não está definida. Adicione-a ao .env (chave server-only).',
-      );
+      this.logger.error('QUALP_API_KEY não está definida');
+      throw new HttpException(TOLL_UNAVAILABLE_MESSAGE, HttpStatus.SERVICE_UNAVAILABLE);
     }
     return key;
   }

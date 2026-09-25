@@ -1,7 +1,8 @@
-import { Body, Controller, Post, Patch, Param } from '@nestjs/common';
+import { Body, Controller, Post } from '@nestjs/common';
 import { ExcludeService } from './exclude.service';
 import { CreateExcludeDto } from './dto/create-exclude.dto';
 
+/** Pedido público de exclusão de conta (LGPD). A baixa é feita pelo suporte. */
 @Controller('exclude')
 export class ExcludeController {
   constructor(private readonly excludeService: ExcludeService) {}
@@ -9,10 +10,5 @@ export class ExcludeController {
   @Post()
   async createExcludeRequest(@Body() dto: CreateExcludeDto) {
     return this.excludeService.createExcludeRequest(dto);
-  }
-
-  @Patch(':id/mark-deleted')
-  async markAsDeleted(@Param('id') id: string) {
-    return this.excludeService.markAsDeleted(id);
   }
 }

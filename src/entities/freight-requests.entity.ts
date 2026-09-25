@@ -68,8 +68,21 @@ export class FreightRequest {
   @UpdateDateColumn()
   updatedAt: Date;
 
+  /** Até quando a solicitação pendente vale; depois ela expira (vira recusada). */
   @Column({ type: 'timestamp', nullable: true })
   expiresAt: Date | null;
+
+  /** Quando a transportadora aceitou ou recusou (ou a solicitação expirou). */
+  @Column({ type: 'timestamp', nullable: true })
+  respondedAt: Date | null;
+
+  /** Quando o motorista informou a entrega. */
+  @Column({ type: 'timestamp', nullable: true })
+  deliveryInformedAt: Date | null;
+
+  /** Quem aceitou/recusou na transportadora ("Sistema" quando expirou). */
+  @Column({ type: 'varchar', nullable: true })
+  respondedByName: string | null;
 
   @Column({ nullable: true, default: 0 })
   solicitationsOrder: number;

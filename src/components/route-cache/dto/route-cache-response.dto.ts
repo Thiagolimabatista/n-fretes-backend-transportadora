@@ -8,6 +8,9 @@ export class RouteCacheResponseDto {
 
   success: boolean;
 
+  /** Eixos usados na tarifa. */
+  axis: number;
+
   tolls: TollDataDto[];
 
   totalToll: number;

@@ -313,14 +313,17 @@ export class UsersContactCompanyService {
       });
   }
 
+  /** Tira o motorista da rede e dos grupos; se voltar, entra só nos grupos escolhidos. */
   async softDeleteUsersContactCompany(companyId: string, id: string): Promise<string> {
-    const result = await this.usersContactCompanyRepository.update(
-      { id, companyId, isActive: true },
-      { isActive: false },
-    );
-    if (!result.affected) {
-      throw new NotFoundException('Motorista não encontrado na sua rede.');
-    }
+    await this.db.transaction(async (manager) => {
+      const result = await manager
+        .getRepository(CompanyUsersContacts)
+        .update({ id, companyId, isActive: true }, { isActive: false });
+      if (!result.affected) {
+        throw new NotFoundException('Motorista não encontrado na sua rede.');
+      }
+      await manager.query(`DELETE FROM "contact-group-members" WHERE "contactId" = $1`, [id]);
+    });
     return 'Motorista removido da sua rede.';
   }
 

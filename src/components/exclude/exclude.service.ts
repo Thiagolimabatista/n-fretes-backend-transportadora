@@ -69,24 +69,4 @@ export class ExcludeService {
       message: 'Solicitação de exclusão recebida com sucesso',
     };
   }
-
-  async markAsDeleted(
-    id: string,
-  ): Promise<{ success: boolean; message: string }> {
-    const excludeRequest = await this.excludeRepository.findOne({
-      where: { id },
-    });
-
-    if (!excludeRequest) {
-      throw new BadRequestException('Solicitação não encontrada');
-    }
-
-    excludeRequest.jaExcluido = true;
-    await this.excludeRepository.save(excludeRequest);
-
-    return {
-      success: true,
-      message: 'Conta marcada como excluída',
-    };
-  }
 }

@@ -12,6 +12,7 @@ import { FreightRequestService } from './freight-request.service';
 import { CreateFreightRequestDto } from './dto/create-freight-request.dto';
 import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
 import { GetUserId } from 'src/decorators/get-user-decorator';
+import { Actor, GetActor } from 'src/decorators/get-actor.decorator';
 import { ParamsFreightRequest } from './interface/IFreightRequest';
 
 @UseGuards(JwtAuthGuard)
@@ -37,35 +38,23 @@ export class FreightRequestController {
 
   /** Aceite em 1 passo: cria a rota e avisa o motorista para iniciá-la. */
   @Patch(':id/accept')
-  async acceptFreightRequest(
-    @GetUserId() companyId: string,
-    @Param('id') id: string,
-  ) {
-    return this.freightRequestService.acceptFreightRequest(companyId, id);
+  async acceptFreightRequest(@GetActor() actor: Actor, @Param('id') id: string) {
+    return this.freightRequestService.acceptFreightRequest(actor.companyId, id, actor);
   }
 
   /** Mantido por compatibilidade: mesma lógica e resposta de `:id/accept`. */
   @Patch(':id/accept-direct')
-  async acceptFreightRequestDirect(
-    @GetUserId() companyId: string,
-    @Param('id') id: string,
-  ) {
-    return this.freightRequestService.acceptFreightRequest(companyId, id);
+  async acceptFreightRequestDirect(@GetActor() actor: Actor, @Param('id') id: string) {
+    return this.freightRequestService.acceptFreightRequest(actor.companyId, id, actor);
   }
 
   @Patch(':id/confirmed')
-  async confirmedFreightRequest(
-    @GetUserId() companyId: string,
-    @Param('id') id: string,
-  ) {
-    return this.freightRequestService.confirmedFreightRequest(companyId, id);
+  async confirmedFreightRequest(@GetActor() actor: Actor, @Param('id') id: string) {
+    return this.freightRequestService.confirmedFreightRequest(actor.companyId, id, actor);
   }
 
   @Patch(':id/reject')
-  async rejectFreightRequest(
-    @GetUserId() companyId: string,
-    @Param('id') id: string,
-  ) {
-    return this.freightRequestService.rejectFreightRequest(companyId, id);
+  async rejectFreightRequest(@GetActor() actor: Actor, @Param('id') id: string) {
+    return this.freightRequestService.rejectFreightRequest(actor.companyId, id, actor);
   }
 }

@@ -2,6 +2,9 @@ import { SpecieOfLoad, TypeOfLoad } from 'src/enum/freight';
 import { BodyType, VehicleType } from 'src/enum/vehicle';
 
 export interface ParamsFreight {
+  /** Ordenação do portal: created_at (padrão), valor ou transportadora. */
+  sortBy?: string;
+  sortOrder?: string;
   /** Texto livre: produto, cidades e nome da transportadora. */
   search?: string;
   originCity?: string;

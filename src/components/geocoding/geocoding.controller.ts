@@ -1,6 +1,9 @@
-import { Body, Controller, Get, HttpException, HttpStatus, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, HttpException, HttpStatus, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { JwtAuthGuard } from 'src/guards/jwt-auth-guard';
 import { GeocodingService } from './geocoding.service';
 
+/** Só usuários logados: cada chamada consome a cota paga do Google. */
+@UseGuards(JwtAuthGuard)
 @Controller('geocoding')
 export class GeocodingController {
   constructor(private readonly geocodingService: GeocodingService) {}

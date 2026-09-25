@@ -240,9 +240,11 @@ export class AuthService {
       throw new HttpException('Informe um CNPJ válido', HttpStatus.BAD_REQUEST);
     }
 
-    const user = await this.companyRepository.findOne({
-      where: cnpjLookupVariants(cnpj).map((variant) => ({ cnpj: variant })),
-    });
+    const user = await this.companyRepository
+      .createQueryBuilder('company')
+      .addSelect('company.password')
+      .where('company.cnpj IN (:...cnpjs)', { cnpjs: cnpjLookupVariants(cnpj) })
+      .getOne();
 
     const isPasswordValid =
       !!user?.password && (await bcrypt.compare(password, user.password));
@@ -279,9 +281,11 @@ export class AuthService {
     try {
       const { oldPassword, newPassword } = changePasswordDto;
 
-      const user = await this.companyRepository.findOne({
-        where: { id: userId },
-      });
+      const user = await this.companyRepository
+        .createQueryBuilder('company')
+        .addSelect('company.password')
+        .where('company.id = :id', { id: userId })
+        .getOne();
 
       if (!user) {
         throw new HttpException('Usuário não encontrado', HttpStatus.NOT_FOUND);
@@ -656,10 +660,12 @@ export class AuthService {
     dto: ContactCompanyLoginDto,
   ): Promise<AuthResponseDto & { company: boolean }> {
     const { email, password } = dto;
-    const contact = await this.contactCompanyRepository.findOne({
-      where: { email },
-      relations: ['company'],
-    });
+    const contact = await this.contactCompanyRepository
+      .createQueryBuilder('contact')
+      .addSelect('contact.password')
+      .leftJoinAndSelect('contact.company', 'company')
+      .where('contact.email = :email', { email })
+      .getOne();
     if (!contact) {
       throw new HttpException('Contato não encontrado', HttpStatus.BAD_REQUEST);
     }

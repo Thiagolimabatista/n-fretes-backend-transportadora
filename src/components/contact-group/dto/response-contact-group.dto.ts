@@ -1,5 +1,3 @@
-import { CompanyUsersContacts } from '@entities/company-users-contacts.entity';
-
 export class ContactGroupResponseDto {
   id: string;
 
@@ -7,7 +5,10 @@ export class ContactGroupResponseDto {
 
   companyId: string;
 
-  contacts: CompanyUsersContacts[];
+  /** Ids (company-users-contacts) dos motoristas ativos no grupo. */
+  contactIds: string[];
+
+  memberCount: number;
 
   isActive: boolean;
 

@@ -20,6 +20,13 @@ import { FreightDocument } from '@entities/freight-documents.entity';
 import { AwsService } from '@components/aws/aws.service';
 import { ConfigService } from '@nestjs/config';
 import { FreightLocal } from 'src/enum/freight';
+import { freightExpiry, toDayKey } from 'src/utils/freight-dates';
+import { Actor, actorName } from 'src/decorators/get-actor.decorator';
+import { SQSService } from '@components/sqs/sqs.service';
+import {
+  rejectOpenRequests,
+  sendDriverMessages,
+} from '@components/freight-request/driver-notices';
 
 /**
  * Regras fixas da plataforma: todo frete é nacional e público
@@ -30,25 +37,10 @@ const FIXED_FREIGHT_RULES = {
   isPublic: true,
 } as const;
 
-const FREIGHT_TIME_ZONE = 'America/Sao_Paulo';
-
 type FreightDates = {
   dateOrigin?: Date | string | null;
   dateReceiver?: Date | string | null;
 };
-
-/** Dia civil em Brasília ("2026-09-21"), para comparar datas sem hora. */
-function toDayKey(value: Date | string | null | undefined): string | null {
-  if (!value) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  if (isNaN(date.getTime())) return null;
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: FREIGHT_TIME_ZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(date);
-}
 
 /**
  * Coleta e entrega não podem ser marcadas no passado, e a entrega não pode
@@ -85,6 +77,71 @@ function assertFreightDates(next: FreightDates, current?: FreightDates) {
   }
 }
 
+/** O que pode mudar com o motorista em viagem (previsões e anotações). */
+const EDITABLE_IN_TRIP = new Set([
+  'dateOrigin',
+  'dateReceiver',
+  'observation',
+  'tags',
+  'isActive',
+  'openSolicitations',
+]);
+
+/** Valor comparável: listas sem ordem, números como número, datas por dia. */
+function comparable(key: string, value: unknown): string {
+  if (value === undefined || value === null || value === '') return '';
+  if (Array.isArray(value)) return [...value].map(String).sort().join(',');
+  if (key === 'vehicleTypes' || key === 'bodyTypes' || key === 'contactCompanyIds') {
+    return String(value).split(',').map((v) => v.trim()).filter(Boolean).sort().join(',');
+  }
+  if (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '' && !isNaN(Number(value)))) {
+    return String(Number(value));
+  }
+  if (value instanceof Date) return value.toISOString();
+  return String(value).trim();
+}
+
+/** Campos travados em viagem que o pedido tenta mudar de verdade. */
+function changedLockedFields(update: Record<string, unknown>, current: Record<string, unknown>): string[] {
+  return Object.keys(update).filter((key) => {
+    if (EDITABLE_IN_TRIP.has(key) || key === 'advance' || key === 'valueAdvance') return false;
+    if (update[key] === undefined) return false;
+    const currentKey = key === 'contactCompanyIds' ? 'contactCompanyIds' : key;
+    return comparable(key, update[key]) !== comparable(key, current[currentKey]);
+  });
+}
+
+function conflict(message: string, errorCode: string): HttpException {
+  return new HttpException({ message, errorCode }, HttpStatus.CONFLICT);
+}
+
+/** Colunas que o portal pode ordenar (`sortBy`); o resto cai na data de publicação. */
+const SORTABLE_COLUMNS: Record<string, string> = {
+  created_at: 'freight.createdAt',
+  valor: 'freight.Valuefreight',
+  transportadora: 'company.nameFantasy',
+};
+
+function applyFreightSort(
+  qb: import('typeorm').SelectQueryBuilder<Freight>,
+  params: { sortBy?: string; sortOrder?: string },
+  allowCompany: boolean,
+) {
+  let column = SORTABLE_COLUMNS[String(params.sortBy ?? '')] ?? 'freight.createdAt';
+  if (!allowCompany && column.startsWith('company.')) column = 'freight.createdAt';
+  const order = String(params.sortOrder ?? '').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+  qb.orderBy(column, order, 'NULLS LAST').addOrderBy('freight.id', 'DESC');
+}
+
+/** Frete com motorista: viagem em andamento ou solicitação aceita/entrega informada. */
+const ACTIVE_TRIP_SQL = `
+  SELECT 1 FROM "freight_routes" r
+   WHERE r."freightId" = $1 AND r."status" = 'PROGUESS' AND r."isActive" = true
+  UNION ALL
+  SELECT 1 FROM "freight_requests" q
+   WHERE q."freightId" = $1 AND q."status" IN ('ACCEPTED', 'DRIVER_CONFIRMED_DELIVERY')
+  LIMIT 1`;
+
 export class FreightService {
   private readonly logger = new Logger(FreightService.name);
 
@@ -101,7 +158,44 @@ export class FreightService {
     private readonly distanceService: DistanceService,
     private readonly awsService: AwsService,
     private readonly configService: ConfigService,
+    private readonly sqsService: SQSService,
   ) {}
+
+  private async hasActiveTrip(freightId: string, manager = this.freightRepository.manager) {
+    const rows = await manager.query(ACTIVE_TRIP_SQL, [freightId]);
+    return rows.length > 0;
+  }
+
+  /**
+   * Contatos e rota de pedágio precisam existir e, no caso dos contatos, ser da
+   * própria empresa (senão um id qualquer seria gravado no frete).
+   */
+  private async assertFreightReferences(
+    companyId: string,
+    fields: { contactCompanyId?: string | null; contactCompanyIds?: string[]; routeCacheId?: string | null },
+  ) {
+    const contactIds = [
+      ...new Set([fields.contactCompanyId, ...(fields.contactCompanyIds ?? [])].filter(Boolean)),
+    ];
+    if (contactIds.length) {
+      const [{ total }] = await this.freightRepository.manager.query(
+        `SELECT count(*)::int AS total FROM "contact-company" WHERE "id" = ANY($1::varchar[]) AND "companyId" = $2`,
+        [contactIds, companyId],
+      );
+      if (total !== contactIds.length) {
+        throw new HttpException('Contato do frete não encontrado na sua equipe.', HttpStatus.BAD_REQUEST);
+      }
+    }
+    if (fields.routeCacheId) {
+      const [route] = await this.freightRepository.manager.query(
+        `SELECT 1 FROM "route_cache" WHERE "id" = $1`,
+        [fields.routeCacheId],
+      );
+      if (!route) {
+        throw new HttpException('Rota de pedágio não encontrada. Calcule o pedágio de novo.', HttpStatus.BAD_REQUEST);
+      }
+    }
+  }
 
   private normalizeTags(tags: string[] = []): string[] {
     return Array.from(
@@ -117,9 +211,11 @@ export class FreightService {
   async createFreightCompany(
     createFreightDto: CreateFreightDto,
     userId: string,
+    actor?: Actor,
   ): Promise<CreateFreightDto> {
     const { advance, valueAdvance, ...fields } = createFreightDto;
     assertFreightDates(fields);
+    await this.assertFreightReferences(userId, fields);
 
     try {
       const create = this.freightRepository.create({
@@ -130,6 +226,9 @@ export class FreightService {
           fields.contactCompanyId ?? fields.contactCompanyIds?.[0] ?? null,
         companyId: userId,
         tags: this.normalizeTags(fields.tags ?? []),
+        expiresAt: freightExpiry(fields.dateOrigin),
+        createdByContactId: actor?.contactId ?? null,
+        createdByName: actor ? await actorName(this.freightRepository.manager, actor) : null,
       });
 
       return await this.freightRepository.save(create);
@@ -176,13 +275,34 @@ export class FreightService {
         where: { id, companyId: userId },
       });
 
-      if (!freight) {
+      if (!freight || freight.isExclude) {
         throw new HttpException('Frete não encontrado', HttpStatus.NOT_FOUND);
       }
 
-      const { advance, valueAdvance, ...fields } = update;
+      // Em viagem só mudam datas previstas, observações e tags (o que o
+      // monitoramento ajusta); carga, rota, valor e veículos ficam travados.
+      if (await this.hasActiveTrip(freight.id)) {
+        const locked = changedLockedFields(
+          update as unknown as Record<string, unknown>,
+          freight as unknown as Record<string, unknown>,
+        );
+        if (locked.length) {
+          throw conflict(
+            'Este frete está em viagem: só dá para mudar as datas previstas e as observações. Acompanhe pelo monitoramento.',
+            'FREIGHT_IN_TRIP',
+          );
+        }
+      }
+
+      // Publicar/despublicar tem rotas próprias (ativar e desativar).
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { advance, valueAdvance, isActive, openSolicitations, ...fields } = update;
       const nextAdvance = valueAdvance ?? advance;
       assertFreightDates(fields, freight);
+      await this.assertFreightReferences(userId, fields);
+
+      const nextDateOrigin =
+        fields.dateOrigin !== undefined ? fields.dateOrigin : freight.dateOrigin;
 
       await this.freightRepository.update(freight.id, {
         ...fields,
@@ -192,6 +312,7 @@ export class FreightService {
           fields.tags !== undefined
             ? this.normalizeTags(fields.tags as string[])
             : freight.tags,
+        expiresAt: freightExpiry(nextDateOrigin, freight.createdAt),
       });
 
       return await this.freightRepository.findOne({ where: { id } });
@@ -207,10 +328,12 @@ export class FreightService {
   }
 
   /****************************************SUGEST DRIVE****************************************** */
-  async getSuggestedDrivers(params: ParamsFreight) {
+  async getSuggestedDrivers(params: ParamsFreight, companyId: string) {
     const { page = 1, take = 10, id } = params;
 
-    const freight = await this.freightRepository.findOne({ where: { id } });
+    const freight = await this.freightRepository.findOne({
+      where: { id, companyId, isExclude: false },
+    });
 
     if (!freight) {
       throw new HttpException('Frete não encontrado', HttpStatus.NOT_FOUND);
@@ -341,9 +464,14 @@ export class FreightService {
       const { take, page } =
         this.paginationService.getDefaultPaginationParams(params);
 
-        const { companyId } = params;
+      const { companyId } = params;
 
       queryBuilder.where('freight.isExclude = false');
+      // Frete de outra empresa só aparece enquanto está publicado e aberto.
+      queryBuilder.andWhere(
+        '(freight.companyId = :viewerId OR (freight.isActive = true AND freight.openSolicitations = true))',
+        { viewerId: userId },
+      );
 
       if (companyId) {
         queryBuilder.andWhere('freight.companyId = :companyId', { companyId });
@@ -409,7 +537,13 @@ export class FreightService {
       });
 
       queryBuilder
-        .leftJoinAndSelect('freight.contactCompany', 'contactCompany')
+        .leftJoin('freight.contactCompany', 'contactCompany')
+        .addSelect([
+          'contactCompany.id',
+          'contactCompany.name',
+          'contactCompany.phoneNumber',
+          'contactCompany.email',
+        ])
         .leftJoin(
           'freight.freightRequest',
           'freightRequest',
@@ -427,8 +561,8 @@ export class FreightService {
           'company.createdAt',
           'company.city',
         ])
-        .leftJoinAndSelect('freight.routeCache', 'routeCache')
-        .addOrderBy('freight.createdAt', 'DESC');
+        .leftJoinAndSelect('freight.routeCache', 'routeCache');
+      applyFreightSort(queryBuilder, params, true);
 
       const [result, total] = await queryBuilder
         .skip((page - 1) * take)
@@ -441,10 +575,8 @@ export class FreightService {
       if (params.id && result.length > 0) {
         const ownerCompanyId = result[0].companyId;
 
-        console.log(result, 'reotrno')
         // routeCache já veio populado pelo leftJoinAndSelect acima
         if (result[0].routeCacheId) {
-          console.log(result[0])
           route = result[0].routeCache ?? null;
         }
 
@@ -667,8 +799,8 @@ export class FreightService {
         }
       });
 
+      applyFreightSort(queryBuilder, params, false);
       const [result, total] = await queryBuilder
-        .orderBy('freight.createdAt', 'DESC')
         .leftJoinAndSelect('freight.contactCompany', 'contactCompany')
         .leftJoin(
           'freight.freightRequest',
@@ -683,7 +815,6 @@ export class FreightService {
 
       const inactiveFreightsCount = await this.freightRepository
         .createQueryBuilder('freight')
-        .leftJoinAndSelect('freight.contactCompany', 'contactCompany')
         .where('freight.companyId = :companyId', { companyId })
         .andWhere('freight.isActive = :isActive', { isActive: false })
         .andWhere('freight.openSolicitations = :openSolicitations', {
@@ -707,29 +838,81 @@ export class FreightService {
 
   /****************************************SOFT DELETE FREIGHT****************************************** */
   /** Desativa o frete (sai das buscas dos motoristas, continua em "Inativo"). */
-  async softDeleteFreight(id: string, companyId: string): Promise<string> {
+  async softDeleteFreight(id: string, companyId: string, actor?: Actor): Promise<string> {
     await this.findOwnedFreight(id, companyId);
-    await this.freightRepository.update(
-      { id, companyId },
-      { isActive: false, openSolicitations: false },
-    );
-    return 'Frete desativado com sucesso';
+    const messages = await this.freightRepository.manager.transaction(async (manager) => {
+      await manager.getRepository(Freight).update(
+        { id, companyId },
+        { isActive: false, openSolicitations: false },
+      );
+      const byName = actor ? await actorName(manager, actor) : undefined;
+      return rejectOpenRequests(manager, { freightIds: [id] }, 'freight_closed', new Date(), byName);
+    });
+    await sendDriverMessages(this.sqsService, this.logger, messages);
+    return messages.length
+      ? `Frete desativado. ${messages.length === 1 ? 'O motorista que tinha pedido foi avisado' : `Os ${messages.length} motoristas que tinham pedido foram avisados`}.`
+      : 'Frete desativado com sucesso';
   }
 
   /****************************************EXCLUDE FREIGHT****************************************** */
-  /** Exclui o frete: some de todas as listas da empresa e dos motoristas. */
-  async excludeFreight(id: string, userId: string): Promise<string> {
+  /**
+   * Exclui o frete. Se ele nunca teve viagem, é apagado de verdade (com
+   * solicitações, visualizações e documentos). Se teve, sai de todas as
+   * listas mas continua no banco, para o histórico e os relatórios. Com
+   * viagem em andamento não pode ser excluído. Quem tinha solicitação aberta
+   * é avisado.
+   */
+  async excludeFreight(id: string, userId: string, actor?: Actor): Promise<string> {
     await this.findOwnedFreight(id, userId);
-    await this.freightRepository.update(
-      { id, companyId: userId },
-      {
-        isExclude: true,
-        isExcludeUserId: userId,
-        isActive: false,
-        openSolicitations: false,
-      },
-    );
-    return 'Frete excluído com sucesso';
+    const bucket = this.configService.get<string>('AWS_S3_BUCKET_NAME');
+
+    const outcome = await this.freightRepository.manager.transaction(async (manager) => {
+      const [locked] = await manager.query(
+        `SELECT "id" FROM "freight" WHERE "id" = $1 AND "companyId" = $2 AND "isExclude" = false FOR UPDATE`,
+        [id, userId],
+      );
+      if (!locked) {
+        throw new HttpException('Frete não encontrado', HttpStatus.NOT_FOUND);
+      }
+      if (await this.hasActiveTrip(id, manager)) {
+        throw conflict(
+          'Este frete está em viagem e não pode ser excluído. Conclua ou cancele a viagem no monitoramento.',
+          'FREIGHT_IN_TRIP',
+        );
+      }
+
+      const byName = actor ? await actorName(manager, actor) : undefined;
+      const messages = await rejectOpenRequests(manager, { freightIds: [id] }, 'freight_deleted', new Date(), byName);
+      const [{ trips }] = await manager.query(
+        `SELECT count(*)::int AS trips FROM "freight_routes" WHERE "freightId" = $1`,
+        [id],
+      );
+
+      if (trips > 0) {
+        await manager.getRepository(Freight).update(
+          { id, companyId: userId },
+          { isExclude: true, isExcludeUserId: userId, isActive: false, openSolicitations: false },
+        );
+        return { deleted: false, messages, fileKeys: [] as string[] };
+      }
+
+      const docs: Array<{ fileKey: string }> = await manager.query(
+        `DELETE FROM "freight-documents" WHERE "freightId" = $1 RETURNING "fileKey"`,
+        [id],
+      ).then(([rows]) => rows ?? []);
+      await manager.query(`DELETE FROM "freight" WHERE "id" = $1 AND "companyId" = $2`, [id, userId]);
+      return { deleted: true, messages, fileKeys: docs.map((d) => d.fileKey) };
+    });
+
+    await sendDriverMessages(this.sqsService, this.logger, outcome.messages);
+    if (outcome.fileKeys.length) {
+      await this.awsService
+        .deleteObjects(bucket, outcome.fileKeys)
+        .catch((error) => this.logger.warn(`Documentos do frete ${id} não apagados do S3: ${error?.message}`));
+    }
+    return outcome.deleted
+      ? 'Frete apagado.'
+      : 'Frete excluído. Ele saiu das listas, mas as viagens feitas continuam no histórico.';
   }
 
   /** Frete da empresa logada que ainda não foi excluído (404 caso contrário). */
@@ -746,13 +929,155 @@ export class FreightService {
     return freight;
   }
 
+  /**
+   * Histórico do frete para o card do kanban: publicação, solicitações,
+   * aceite/recusa/expiração, viagem, entrega e anexos, cada um com quem fez.
+   * Montado a partir dos registros (datas e nomes gravados em cada ação).
+   */
+  async getFreightHistory(id: string, companyId: string) {
+    const freight = await this.freightRepository.findOne({
+      where: { id, companyId },
+      select: ['id', 'createdAt', 'createdByName', 'isActive', 'isExclude', 'sourceFreightId'],
+    });
+    if (!freight) {
+      throw new HttpException('Frete não encontrado', HttpStatus.NOT_FOUND);
+    }
+    const db = this.freightRepository.manager;
+    const [requests, routes, documents] = await Promise.all([
+      db.query(
+        `SELECT q."id", q."status", q."createdAt", q."respondedAt", q."respondedByName",
+                q."deliveryInformedAt", d."name" AS "driverName"
+           FROM "freight_requests" q
+           LEFT JOIN "users_drive" d ON d."id" = q."userDriveId"
+          WHERE q."freightId" = $1`,
+        [id],
+      ),
+      db.query(
+        `SELECT r."id", r."status", r."startedAt", r."completedAt", r."completedByName", d."name" AS "driverName",
+                (SELECT min(p."timestamp") FROM "freight_route_locations" p WHERE p."routeId" = r."id") AS "firstPointAt"
+           FROM "freight_routes" r
+           LEFT JOIN "users_drive" d ON d."id" = r."userDriveId"
+          WHERE r."freightId" = $1`,
+        [id],
+      ),
+      db.query(
+        `SELECT "fileName", "createdAt" FROM "freight-documents" WHERE "freightId" = $1 AND "isActive" = true`,
+        [id],
+      ),
+    ]);
+
+    type Entry = { type: string; label: string; at: string; by: string | null; detail?: string | null };
+    const events: Entry[] = [];
+    const add = (type: string, label: string, at: unknown, by: string | null, detail?: string | null) => {
+      const date = at ? new Date(at as string) : null;
+      if (date && !isNaN(date.getTime())) events.push({ type, label, at: date.toISOString(), by, detail });
+    };
+
+    add(
+      'PUBLISHED',
+      freight.sourceFreightId ? 'Frete publicado (cópia de outro frete)' : 'Frete publicado',
+      freight.createdAt,
+      freight.createdByName ?? null,
+    );
+    for (const q of requests) {
+      add('REQUESTED', 'Motorista pediu o frete', q.createdAt, q.driverName ?? 'Motorista');
+      if (q.respondedAt) {
+        if (['ACCEPTED', 'DRIVER_CONFIRMED_DELIVERY', 'DELIVERY_COMPLETED', 'NOT_CONFIRMED_DELIVERY'].includes(q.status)) {
+          add('ACCEPTED', 'Motorista aceito', q.respondedAt, q.respondedByName ?? null, q.driverName);
+        } else if (q.status === 'REJECTED') {
+          const system = q.respondedByName === 'Sistema';
+          add(
+            system ? 'EXPIRED' : 'REJECTED',
+            system ? 'Solicitação expirou sem resposta' : 'Solicitação recusada',
+            q.respondedAt,
+            q.respondedByName ?? null,
+            q.driverName,
+          );
+        }
+      }
+      if (q.deliveryInformedAt) {
+        add('DELIVERY_INFORMED', 'Motorista informou a entrega', q.deliveryInformedAt, q.driverName ?? 'Motorista');
+      }
+    }
+    for (const r of routes) {
+      add('ROUTE_STARTED', 'Viagem iniciada', r.firstPointAt ?? r.startedAt, r.driverName ?? 'Motorista');
+      if (r.status === 'COMPLETED') {
+        add('DELIVERED', 'Entrega confirmada', r.completedAt, r.completedByName ?? null, r.driverName);
+      } else if (r.status === 'CANCEL') {
+        add('ROUTE_CANCELED', 'Viagem cancelada', r.completedAt, r.completedByName ?? r.driverName ?? null, r.driverName);
+      }
+    }
+    for (const doc of documents) {
+      add('DOCUMENT', 'Anexo adicionado', doc.createdAt, null, doc.fileName);
+    }
+
+    events.sort((a, b) => a.at.localeCompare(b.at));
+    return { freightId: id, events };
+  }
+
+  /** Publica de novo: só sem motorista em viagem e com a coleta de hoje em diante. */
   async activateFreight(id: string, companyId: string): Promise<string> {
-    await this.findOwnedFreight(id, companyId);
+    const freight = await this.findOwnedFreight(id, companyId);
+    if (await this.hasActiveTrip(id)) {
+      throw conflict('Este frete está em viagem e não pode ser publicado de novo.', 'FREIGHT_IN_TRIP');
+    }
+    const pickupDay = toDayKey(freight.dateOrigin);
+    if (pickupDay && pickupDay < toDayKey(new Date())) {
+      throw conflict(
+        'A data de coleta já passou. Edite o frete com a nova data para publicar de novo.',
+        'FREIGHT_PICKUP_PAST',
+      );
+    }
     await this.freightRepository.update(
       { id, companyId },
-      { isActive: true, openSolicitations: true },
+      { isActive: true, openSolicitations: true, expiresAt: freightExpiry(freight.dateOrigin) },
     );
     return 'Frete ativado com sucesso';
+  }
+
+  /**
+   * Duplica um frete da empresa (ativo ou não): mesma carga, rota, veículos e
+   * valores; datas só são mantidas se a coleta ainda não passou. O novo frete
+   * já sai publicado e guarda a origem em `sourceFreightId`.
+   */
+  async duplicateFreight(id: string, companyId: string, actor?: Actor): Promise<Freight> {
+    const source = await this.findOwnedFreight(id, companyId);
+    const today = toDayKey(new Date());
+    const keepDates = !source.dateOrigin || toDayKey(source.dateOrigin) >= today;
+    const {
+      /* eslint-disable @typescript-eslint/no-unused-vars */
+      id: _id,
+      createdAt: _createdAt,
+      updatedAt: _updatedAt,
+      isExcludeUserId: _excludedBy,
+      createdByContactId: _createdBy,
+      createdByName: _createdByName,
+      /* eslint-enable @typescript-eslint/no-unused-vars */
+      ...fields
+    } = source;
+    const dateOrigin = keepDates ? source.dateOrigin : null;
+    const dateReceiver =
+      keepDates && (!source.dateReceiver || toDayKey(source.dateReceiver) >= today)
+        ? source.dateReceiver
+        : null;
+
+    const copy = this.freightRepository.create({
+      ...fields,
+      ...FIXED_FREIGHT_RULES,
+      dateOrigin,
+      dateReceiver,
+      companyId,
+      isActive: true,
+      openSolicitations: true,
+      isExclude: false,
+      isFeatured: false,
+      sourceFreightId: source.id,
+      tags: this.normalizeTags(source.tags ?? []),
+      expiresAt: freightExpiry(dateOrigin),
+      createdByContactId: actor?.contactId ?? null,
+      createdByName: actor ? await actorName(this.freightRepository.manager, actor) : null,
+    });
+    return this.freightRepository.save(copy);
   }
 
   /****************************************FILTERS REGIONS****************************************** */
@@ -1066,9 +1391,15 @@ export class FreightService {
     return null;
   }
   /****************************************FILTERS REGIONS****************************************** */
-  async getFreightById(id: string): Promise<Freight> {
+  /** Frete da própria empresa, ou de outra enquanto estiver publicado e aberto. */
+  async getFreightById(id: string, companyId: string): Promise<Freight> {
     try {
-      const freight = await this.freightRepository.findOne({ where: { id } });
+      const freight = await this.freightRepository.findOne({
+        where: [
+          { id, companyId, isExclude: false },
+          { id, isExclude: false, isActive: true, openSolicitations: true },
+        ],
+      });
 
       if (!freight) {
         throw new HttpException('Frete não encontrado', HttpStatus.NOT_FOUND);
@@ -1076,10 +1407,8 @@ export class FreightService {
 
       return freight;
     } catch (error) {
-      throw new HttpException(
-        error?.message || 'Erro ao buscar o frete',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      if (error instanceof HttpException) throw error;
+      throw new HttpException('Erro ao buscar o frete', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -1172,6 +1501,12 @@ export class FreightService {
 
       doc.isActive = false;
       await this.freightDocumentRepository.save(doc);
+
+      // O link do arquivo é público: removido no portal, sai do S3 também.
+      const bucket = this.configService.get<string>('AWS_S3_BUCKET_NAME');
+      await this.awsService
+        .deleteObjects(bucket, [doc.fileKey])
+        .catch((error) => this.logger.warn(`Arquivo ${doc.fileKey} não apagado do S3: ${error?.message}`));
 
       return { message: 'Documento removido com sucesso' };
     } catch (error) {
